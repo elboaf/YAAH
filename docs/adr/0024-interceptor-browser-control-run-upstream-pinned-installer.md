@@ -85,11 +85,18 @@ of someone else's payload?
      preflight — and an opaque reply does not stop the side effect (CORS
      governs reading, not acting). The route therefore refuses any Origin
      that is not the YAAH UI (403 `cross_origin_refused`). Callers that
-     send no Origin at all — curl, the headless server's web surface, the
-     remote exec proxy, the test client — are unaffected; the
-     discrimination is "did a browser page ask", not "is this a browser".
-     The check reuses the CORS origin pattern (`_UI_ORIGIN_RE`), so the
-     two cannot drift apart and reopen either the hole or a real UI.
+     send no Origin at all — curl, the remote client's httpx, the test
+     client — are unaffected; the discrimination is "did a browser page
+     ask", not "is this a browser".
+     The allowlist is an **exact origin set** (`_UI_ORIGINS`), shared with
+     `CORSMiddleware`: `http://localhost:1420` and `http://127.0.0.1:1420`
+     (Vite dev — `strictPort` pins 1420), `http(s)://tauri.localhost`
+     (Windows/Linux webview) and `tauri://localhost` (macOS webview). It is
+     deliberately *not* a loopback pattern: a different port is a different
+     origin, so a page served by any other local server — the second hole
+     #776 names — is refused. One value, two consumers, so the CORS policy
+     and the CSRF check cannot drift apart and reopen either the hole or a
+     real UI.
 
    `remove_links()` was never CSRF-able (DELETE needs a preflight), but it
    is covered by the same namespace gate.

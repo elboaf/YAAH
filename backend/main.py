@@ -135,25 +135,42 @@ API_PORT = 8765
 
 app = FastAPI(title="AI Coding Agent", version=__version__, lifespan=lifespan)
 
-# The one origin pattern the API treats as its own UI (#776): the Tauri
-# webview differs per platform -- tauri://localhost on macOS,
-# http(s)://tauri.localhost on Windows/Linux -- plus non-Tauri local dev
-# (Vite on localhost:1420) and the loopback forms. Used twice:
-# CORSMiddleware below (may the caller READ a reply) and the Interceptor
-# install route's CSRF origin check (may this request ACT at all). One
-# pattern, so the two can never drift.
-_UI_ORIGIN_RE = re.compile(
-    r"^https?://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?$|^tauri://localhost$"
+# The exact origins the API treats as its own UI (#776). A *set*, not a
+# pattern: a different port is a different origin, so an unrelated local
+# server on 127.0.0.1:8000 is not the UI and must not reach the install
+# route. Two consumers, one value: CORSMiddleware (may the caller READ a
+# reply) and the Interceptor install route's CSRF origin check (may this
+# request ACT at all).
+#
+#   http://localhost:1420      Vite dev (vite.config.ts pins strictPort 1420,
+#   http://127.0.0.1:1420      so the port cannot drift); the 127.0.0.1 form
+#                              is a distinct origin a dev may type.
+#   http://tauri.localhost     Tauri webview, Windows/Linux.
+#   https://tauri.localhost    Same webview when built with the https scheme.
+#   tauri://localhost          Tauri webview, macOS.
+#
+# A request with NO Origin is not in this set but is still accepted by the
+# install check: non-browser callers (curl, the remote client's httpx, the
+# test client) send none, and "did a browser page ask" is the question that
+# matters. Browsers always send Origin on a cross-origin POST.
+_UI_ORIGINS = frozenset(
+    {
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "tauri://localhost",
+    }
 )
 
 app.add_middleware(
     CORSMiddleware,
     # The Tauri webview origin differs per platform: tauri://localhost on
-    # macOS, http(s)://tauri.localhost on Windows/Linux. Cover vite dev and
-    # any tauri origin; the server only ever listens on localhost.
-    # (This adds no reach to a foreign page: CORS is not what stops a side
-    # effect -- the install route's origin check below is.)
-    allow_origin_regex=_UI_ORIGIN_RE.pattern,
+    # macOS, http(s)://tauri.localhost on Windows/Linux. Exact origins, so
+    # no other page can read an API reply. (This adds no reach to a foreign
+    # page: CORS is not what stops a side effect -- the install route's
+    # origin check below is.)
+    allow_origins=sorted(_UI_ORIGINS),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1916,11 +1933,16 @@ def _install_origin_refused(origin: str) -> bool:
     The install route is a bodiless POST, so a cross-origin page can reach
     it as a CORS *simple* request: no preflight, and the opaque reply does
     not stop the side effect (CORSMiddleware governs reading, not acting).
-    A browser always sends Origin on a cross-origin POST; the legitimate
-    non-browser callers -- the headless server's web surface, a Tauri
-    webview fetch, curl, the test client -- send none, and are unaffected.
+    A browser always sends Origin on a cross-origin POST, so any Origin
+    outside ``_UI_ORIGINS`` is a page that is not the UI -- including an
+    unrelated local server on a different loopback port, which is a
+    different origin and the exact hole #776 names.
+
+    A request with NO Origin is accepted: non-browser callers (curl, the
+    remote client's httpx, the test client) send none, and the
+    discrimination is "did a browser page ask", not "is this a browser".
     """
-    return bool(origin) and not _UI_ORIGIN_RE.match(origin)
+    return bool(origin) and origin not in _UI_ORIGINS
 
 
 @app.post("/api/interceptor/install")
