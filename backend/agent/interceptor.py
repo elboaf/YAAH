@@ -177,14 +177,29 @@ def _link_slot_paths() -> dict[str, Path]:
     return {name: base / name for name in LINK_SLOTS}
 
 
-def _link_is_real_dir(path: Path) -> bool:
-    """True when the link resolves to a real directory (not a dangling
-    junction/symlink, not a missing entry). At most one level of indirection
-    is followed, so a broken link is reported, never chased into an error.
+def _link_is_link(path: Path) -> bool:
+    """True when the slot entry is a link type -- a junction or a
+    directory symlink -- regardless of whether its target is live.
+
+    This is the discriminator that fixes #775: it separates "is this slot
+    holding a link we can judge as linked/dangling" from "is this slot
+    holding a plain real directory that must never read as linked". A plain
+    real directory (YAAH's own bundled 'research' skill, or a pre-existing
+    folder) is NOT a link and is reported as 'occupied'. A symlink is
+    detectable on every platform (is_symlink); a junction is a Windows-only
+    link type, so its detection is delegated to the install flow's own
+    reparse-point check (imported lazily, so the manager never imports the
+    Windows-only install module at load time).
     """
     try:
-        return path.is_dir()  # follows one level: real dir or live junction
-    except OSError:
+        if path.is_symlink():
+            return True
+        # A junction is a Windows-only object; is_symlink() is False for it,
+        # so defer to the install flow's reparse-point discriminator.
+        from backend.agent import interceptor_install
+
+        return interceptor_install._is_junction(path)
+    except (OSError, Exception):  # noqa: BLE001 -- never chase into an error
         return False
 
 
@@ -259,17 +274,44 @@ def installed_version() -> str | None:
     return version
 
 
+def _link_is_real_dir(path: Path) -> bool:
+    """True when the slot resolves to a *real* directory, following at most
+    one level into a live junction/symlink.
+
+    Used to decide whether a link (junction/symlink) is live, and whether a
+    non-link entry is a directory at all. A missing entry or a dangling link
+    does not resolve here. Never raises.
+    """
+    try:
+        return path.is_dir()  # follows one level: real dir or live junction/symlink
+    except OSError:
+        return False
+
+
 def skill_links_state() -> dict[str, str]:
     """Per-link state for each of router/browser/research.
 
-    'linked' when the slot resolves to a real directory, else 'not
-    linked'. A dangling junction (Interceptor uninstalled externally) is
-    'not linked' here, never an exception -- same as an absent entry.
+    Priority: a link type (junction or directory symlink) is judged by its
+    target -- live ('linked') or dangling ('not linked'); only a slot that
+    is NOT a link but IS a real directory reads 'occupied' (a pre-existing
+    folder, or YAAH's own bundled 'research' skill -- see #775); an absent
+    entry reads 'not linked'.
+
+    The summary counts only 'linked' slots, so a preserved real directory
+    no longer inflates the count into a false '3/3' (#775). Never an
+    exception.
     """
-    return {
-        name: ("linked" if _link_is_real_dir(path) else "not linked")
-        for name, path in _link_slot_paths().items()
-    }
+    result = {}
+    for name, path in _link_slot_paths().items():
+        if _link_is_link(path):
+            # A junction/symlink: live (resolves to a real dir) or dangling.
+            result[name] = "linked" if _link_is_real_dir(path) else "not linked"
+        elif _link_is_real_dir(path):
+            # A plain real directory that is not a link: preserved, occupied.
+            result[name] = "occupied"
+        else:
+            result[name] = "not linked"
+    return result
 
 
 def skill_links_summary(states: dict[str, str] | None = None) -> str:
@@ -383,7 +425,7 @@ def status() -> dict:
 
       installed            'installed' | 'not installed'
       version              dotted version string, or None
-      skill_links          {name: 'linked'|'not linked'}
+      skill_links          {name: 'linked'|'occupied'|'not linked'}
       skill_links_summary  'x/total'
       extension            'ready' | 'extension missing'
       cli                the resolved CLI path, or None

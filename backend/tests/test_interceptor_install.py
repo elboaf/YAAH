@@ -109,11 +109,15 @@ def _install_cli(monkeypatch, exists: bool = True):
 
 
 def _junctions(monkeypatch):
-    """Fake _create_junctions to return the three link names -> pack paths."""
+    """Fake _create_junctions to return the three link names -> pack paths
+    in the {"junctions": {...}, "occupied": {}} shape the caller reads."""
     monkeypatch.setattr(
         inst,
         "_create_junctions",
-        lambda: {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS},
+        lambda: {
+            "junctions": {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS},
+            "occupied": {},
+        },
     )
 
 
@@ -238,7 +242,10 @@ def test_idempotent_rerun_repairs_missing_junction(
 
     def _fake_repair():
         calls["junctions"] += 1
-        return {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS}
+        return {
+            "junctions": {name: f"/packs/{name}" for name in interceptor.LINK_SLOTS},
+            "occupied": {},
+        }
 
     monkeypatch.setattr(inst, "_create_junctions", _fake_repair)
 
@@ -291,6 +298,55 @@ def test_is_junction_distinguishes_from_real_dir(tmp_path):
     assert inst._is_junction(junction) is True
     assert inst._is_junction(real) is False
     assert inst._is_junction(tmp_path / "missing") is False
+
+
+def test_create_junctions_reports_bundled_skill_dir_as_occupied(monkeypatch, manifest, tmp_path):
+    """#775 acceptance: a slot held by a real directory that is NOT a link
+    (YAAH's own bundled 'research' skill colliding with the 'research'
+    slot) is reported as 'occupied', never advertised as a junction target.
+
+    `_create_junctions` is pure-stdlib path logic (only `_create_junction`
+    itself shells out), so this runs everywhere and needs no real junctions.
+    """
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("YAAH_SKILLS_PATH", str(skills))
+
+    packs = tmp_path / "Programs" / "Interceptor" / "skills"
+    for name in ("interceptor", "interceptor-browser", "interceptor-research"):
+        (packs / name).mkdir(parents=True)
+    monkeypatch.setattr(
+        interceptor, "_INSTALL_DIR_CANDIDATES", (str(packs.parent),)
+    )
+
+    # 'research' is a real directory (the colliding bundled skill), not a
+    # link. router/browser resolve to real packs and become junctions.
+    (skills / "research").mkdir()
+
+    # _create_junction shells out to PowerShell (a junction is a
+    # Windows-only object), so faking the leaf lets this pure-path-logic
+    # test run on Linux CI without a real junction -- matching the
+    # test_symlink_slot_repair_via_seam pattern below. The report shape is
+    # what we assert; the junction leaf itself is not under test here.
+    created = []
+    monkeypatch.setattr(
+        inst,
+        "_create_junction",
+        lambda target, link: created.append((str(link), target)),
+    )
+
+    result = inst._create_junctions()
+
+    # The bundled-skill slot is NOT a junction target...
+    assert "research" not in result["junctions"]
+    assert "research" in result["occupied"]
+    assert result["occupied"]["research"] == str((skills / "research").resolve())
+    # ...and the two genuine slots still get junction targets.
+    assert result["junctions"].get("router") == str((packs / "interceptor").resolve())
+    assert result["junctions"].get("browser") == str((packs / "interceptor-browser").resolve())
+    # On a non-Windows host the junctions are not actually created, but the
+    # report shape is still correct.
+
 
 
 def test_real_junctions_created_on_install(monkeypatch, manifest, tmp_path, fake_install):
@@ -490,7 +546,8 @@ def test_symlink_slot_gets_repaired(monkeypatch, manifest, tmp_path, fake_instal
     _make_symlink(skills / "browser", elsewhere)
     (skills / "research").mkdir()
 
-    junctions = inst._create_junctions()
+    junction_result = inst._create_junctions()
+    junctions = junction_result["junctions"]
 
     assert inst._is_junction(router), "correct junction should be left alone"
     browser_link = skills / "browser"
@@ -595,7 +652,8 @@ def test_symlink_slot_repair_via_seam(monkeypatch, manifest, tmp_path, fake_inst
         lambda target, link: created.append(str(link)),
     )
 
-    junctions = inst._create_junctions()
+    junction_result = inst._create_junctions()
+    junctions = junction_result["junctions"]
 
     assert not os.path.lexists(str(browser)), "mis-pointed symlink survived"
     assert str(browser) in created, "slot was not recreated via the leaf"
