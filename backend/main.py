@@ -1695,6 +1695,7 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
         hand-off, whose items would otherwise be dropped (nothing is
         draining a wake-fired turn's queue once the run completes — the
         browser's follow-up-turn path does not run here)."""
+        deferred_handoff = None
         try:
             async for line in run_agent(
                 conversation_id,
@@ -1708,36 +1709,38 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
                     loop_mod.enqueue_message(conversation_id, prompt)
                     return
                 if '"type": "queued_autosend"' in line or '"type":"queued_autosend"' in line:
-                    # The loop already re-persists any drained items it
-                    # hands off here; re-enqueue them and fire a follow-up
-                    # wake so they actually run. The follow-up wake lands
-                    # on an idle conversation now (this run completed), so
-                    # it starts a fresh turn and can never self-deadlock.
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    items = event.get("items") or []
-                    if not items:
-                        continue
-                    for item in items:
-                        loop_mod.enqueue_message(
-                            conversation_id,
-                            item.get("text") or "",
-                            skills=item.get("skills") or [],
-                            images=item.get("images") or [],
-                            attachments=item.get("attachments") or [],
-                        )
-                    asyncio.create_task(
-                        wake_conversation(
-                            conversation_id,
-                            WAKE_RESUME_PROMPT,
-                            source="wake-resume",
-                        )
-                    )
-                    return
+                    # Collect the handoff but keep draining: firing the
+                    # follow-up wake before this stream is exhausted can
+                    # let it race the claim release and queue behind the
+                    # ending run. Re-enqueue now, fire the wake after the
+                    # stream finishes so the conversation is idle.
+                    if deferred_handoff is None:
+                        try:
+                            event = json.loads(line)
+                        except ValueError:
+                            event = None
+                        deferred_handoff = (event.get("items") or [])
+                    continue
         except Exception:  # noqa: BLE001 — a failed wake must not kill its caller
             log.exception("wake-fired run on conversation %s failed (%s)", conversation_id, source)
+        # Stream exhausted — the conversation claim is released. Now fire
+        # the follow-up wake so it starts a fresh turn on an idle chat.
+        if deferred_handoff is not None and deferred_handoff:
+            for item in deferred_handoff:
+                loop_mod.enqueue_message(
+                    conversation_id,
+                    item.get("text") or "",
+                    skills=item.get("skills") or [],
+                    images=item.get("images") or [],
+                    attachments=item.get("attachments") or [],
+                )
+            asyncio.create_task(
+                wake_conversation(
+                    conversation_id,
+                    WAKE_RESUME_PROMPT,
+                    source="wake-resume",
+                )
+            )
 
     task = asyncio.create_task(_drain())
     _WAKE_RUN_TASKS.add(task)
