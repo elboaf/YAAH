@@ -12,12 +12,15 @@ Covers the v1 definition of done:
 - gh exclusion: worker shells get an environment without the bundled gh
   bin dir and without gh auth vars.
 - contribution flow: submit requires a clean desk + at most one pending
-  row; review merge refuses a dirty checkout; reject/abandon close the
-  row and bounce to the authoring worker.
+  row; review merge defers on a dirty checkout or an active root-capable
+  turn; reject moves the row to an open 'revision' state (the resubmit
+  updates the SAME row — rejection never closes), abandon closes it; both
+  bounce to the authoring worker.
 - prompt surface: the worker fragment is worker-conditional (ordinary
   chats never see it); the fixed-core prose names every new schema.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -473,9 +476,34 @@ def test_review_merge_reject_and_wake(ws_repo, inbox_mem_reset, monkeypatch):
         assert result.get("decision") == "reject"
         assert result.get("bounced_to_worker") is True
         assert any(w == cid for w, _s in wakes), "rejection must wake the worker"
-        closed = desks_mod.list_inbox(str(ws_repo), include_closed=True)
-        assert closed[-1]["status"] == "rejected"
-        assert closed[-1]["review"] == "wrong approach"
+        # Rejection does NOT close: the row moves to an open 'revision'
+        # state — closes only on merge or explicit abandon (#681).
+        row_after = next(
+            r for r in desks_mod.list_inbox(str(ws_repo), include_closed=True)
+            if r["id"] == result["contribution_id"]
+        )
+        assert row_after["status"] == "revision"
+        assert row_after["review"] == "wrong approach"
+        # The bounce freed the pending slot: a resubmit UPDATES the same
+        # row (no duplicate row, no new id).
+        _git(Path(seat["dir"]), "checkout", "-q", "feat2")
+        Path(seat["dir"], "feat2.txt").write_text("y2", encoding="utf-8")
+        _git(Path(seat["dir"]), "add", ".")
+        _git(Path(seat["dir"]), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "feat2 revised")
+        result = await tools_mod.execute_tool(
+            "submit_contribution",
+            {"summary": "feat2 revised", "branch": "feat2"},
+            str(ws_repo), conversation_id=cid,
+        )
+        assert result.get("submitted") is True, result
+        assert result.get("resubmitted") is True
+        assert result["contribution_id"] == row_after["id"]
+        rows_now = desks_mod.list_inbox(str(ws_repo), include_closed=True)
+        assert len(rows_now) == 2  # feat (merged) + feat2 — no duplicate row
+        assert sum(1 for r in rows_now if r["worker_conversation_id"] == cid
+                   and r["status"] == "pending") == 1
+        assert next(r for r in rows_now if r["id"] == row_after["id"])["status"] == "pending"
 
     import asyncio
     asyncio.run(run())
@@ -651,4 +679,326 @@ def test_no_origin_in_desk_clone(ws_repo):
         assert str(ws_repo) in out
 
     import asyncio
+    asyncio.run(run())
+
+
+# ---- CodeRabbit round fixes (PR #795) -------------------------------------------
+
+
+def test_handover_failure_is_loud_and_leaves_seat_free(ws_repo):
+    """A failed handover (fetch can't reach the workspace repo) must NOT
+    return a success descriptor: claim_desk raises, and the seat stays
+    unassigned so a retry re-runs the whole handover."""
+    import asyncio
+
+    async def run():
+        seat = await desks_mod.claim_desk(str(ws_repo))
+        seat_dir = Path(seat["dir"])
+        (seat_dir / "untracked-keeper.txt").write_text("keep", encoding="utf-8")
+        # The workspace repo's clone remote dies (the checkout itself stays
+        # alive — claim_desk's precondition needs it) — fetch must fail.
+        remote_url = _git(seat_dir, "config", "--get", "remote.workspace.url")[1].strip()
+        _git(seat_dir, "remote", "set-url", "workspace", str(Path(remote_url).parent / "gone"))
+        try:
+            with pytest.raises(RuntimeError, match="handover failed"):
+                await desks_mod.claim_desk(str(ws_repo))
+        finally:
+            _git(seat_dir, "remote", "set-url", "workspace", remote_url)
+        # The seat carries no occupancy marker (still free for a retry) and
+        # the untracked file survived the failed handover untouched.
+        marker = seat_dir / desks_mod.DESK_MARKER
+        assert marker.is_file()
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        assert data.get("worker_conversation_id") is None
+        assert (seat_dir / "untracked-keeper.txt").read_text(encoding="utf-8") == "keep"
+
+    import asyncio
+    asyncio.run(run())
+
+
+def test_handover_untracked_collision_refuses_and_survives(ws_repo):
+    """An inherited untracked file at a path the new workspace commit tracks
+    must never be clobbered: checkout -B refuses, the handover fails loudly,
+    the file survives byte-for-byte, and no branch tip moves."""
+    import asyncio
+
+    async def run():
+        seat = await desks_mod.claim_desk(str(ws_repo))
+        seat_dir = Path(seat["dir"])
+        # The predecessor leaves an untracked file where the workspace's NEXT
+        # commit will track a file of the same name.
+        (seat_dir / "collision.txt").write_text("precious", encoding="utf-8")
+        _git(seat_dir, "checkout", "-q", "-b", "predecessor-work")
+        _git(seat_dir, "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "--allow-empty", "-m", "predecessor work")
+        predecessor_tip = _git(seat_dir, "rev-parse", "predecessor-work")[1].strip()
+        # The workspace tracks collision.txt now.
+        (ws_repo / "collision.txt").write_text("workspace version", encoding="utf-8")
+        _git(ws_repo, "add", ".")
+        _git(ws_repo, "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "track collision")
+        hand = await desks_mod.handover(str(ws_repo), seat_dir)
+        assert hand.get("failed") is True, hand
+        assert (seat_dir / "collision.txt").read_text(encoding="utf-8") == "precious"
+        assert _git(seat_dir, "rev-parse", "predecessor-work")[1].strip() == predecessor_tip
+
+    asyncio.run(run())
+
+
+def test_concurrent_spawns_cannot_share_a_desk(ws_repo, inbox_mem_reset):
+    """Two overlapping seat claims reserve BEFORE yielding: different desks,
+    and each reservation is visibly non-free to the other claim."""
+    import asyncio
+
+    async def run():
+        s1, s2 = await asyncio.gather(
+            desks_mod.seat_worker(str(ws_repo), 0),
+            desks_mod.seat_worker(str(ws_repo), 0),
+        )
+        assert s1["dir"] != s2["dir"], "two spawns must never share a desk"
+        assert s1["dir"] != s2["dir"]
+        # Both seats now carry a non-free reservation.
+        for s in (s1, s2):
+            data = json.loads(
+                (Path(s["dir"]) / desks_mod.DESK_MARKER).read_text(encoding="utf-8")
+            )
+            assert data.get("reserved_by"), data
+        # Convert the reservations to real workers — the same write
+        # spawn_worker_tool does once its conversation row exists.
+        await desks_mod._write_marker(Path(s1["dir"]), 11)
+        await desks_mod._write_marker(Path(s2["dir"]), 22)
+        status = desks_mod.pool_status(str(ws_repo))
+        occupants = sorted(
+            int(s["worker_conversation_id"]) for s in status["seats"]
+            if s["worker_conversation_id"]
+        )
+        assert occupants == [11, 22]
+
+    asyncio.run(run())
+
+
+def test_reservation_marker_shape_and_stale_takeover(ws_repo):
+    """A fresh reservation blocks the seat; past the TTL it is stale and a
+    new claim may take the seat over (a crashed spawner must not leak a
+    seat against the pool cap forever)."""
+    import asyncio
+
+    async def run():
+        seat = await desks_mod.seat_worker(str(ws_repo), 0)
+        seat_dir = Path(seat["dir"])
+        marker = seat_dir / desks_mod.DESK_MARKER
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        assert data.get("reserved_by"), data
+        assert data.get("worker_conversation_id") == data.get("reserved_by")
+        # Fresh reservation: not expired.
+        assert not desks_mod._reservation_expired(data)
+        # Age it past the TTL: the next claim takes the seat over.
+        data["reserved_at"] -= desks_mod.RESERVATION_TTL + 1.0
+        marker.write_text(json.dumps(data), encoding="utf-8")
+        assert desks_mod._reservation_expired(data)
+        retaken = await desks_mod.claim_desk(str(ws_repo))
+        assert retaken["reused"] is True
+        assert retaken["dir"] == str(seat_dir)
+
+    asyncio.run(run())
+
+
+def test_spawn_creation_failure_releases_the_reservation(ws_repo, inbox_mem_reset, monkeypatch):
+    """If conversation creation fails after the seat was reserved, the
+    reservation is freed so the desk is reusable (no leaked seat)."""
+    import asyncio
+
+    async def run():
+        import backend.db.database as db
+
+        async def boom(**kwargs):
+            raise RuntimeError("db exploded")
+
+        monkeypatch.setattr(db, "create_conversation", boom)
+        with pytest.raises(RuntimeError, match="db exploded"):
+            await desks_mod.spawn_worker_tool(
+                workspace=str(ws_repo), task="t", name="w", conversation_id=None,
+            )
+        # The seat is free again (no reservation, no occupant).
+        status = desks_mod.pool_status(str(ws_repo))
+        assert status["seats"], "the clone must still exist"
+        marker = Path(status["pool"]) / str(status["seats"][0]["seat"]) / desks_mod.DESK_MARKER
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        assert data.get("worker_conversation_id") is None
+        assert not data.get("reserved_by")
+        # And the desk can be claimed again.
+        seat = await desks_mod.claim_desk(str(ws_repo))
+        assert seat["reused"] is True
+
+    asyncio.run(run())
+
+
+def test_submit_persistence_failure_rolls_back(ws_repo, inbox_mem_reset, monkeypatch):
+    """If the mirror write fails, submit reports an error and the in-memory
+    row is rolled back — a submission is never reported successful unless
+    it is durably persisted."""
+    import asyncio
+
+    async def run():
+        cid, seat = await _make_worker(str(ws_repo))
+        _git(Path(seat["dir"]), "checkout", "-q", "-b", "featx")
+        Path(seat["dir"], "featx.txt").write_text("x", encoding="utf-8")
+        _git(Path(seat["dir"]), "add", ".")
+        _git(Path(seat["dir"]), "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "featx")
+
+        def boom(workspace):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(desks_mod, "_save_inbox", boom)
+        result = await desks_mod.submit_contribution_tool(
+            workspace=str(ws_repo), summary="s", branch="featx",
+            conversation_id=cid,
+        )
+        assert result.get("error"), result
+        assert "disk full" in result["error"]
+        assert desks_mod.list_inbox(str(ws_repo), include_closed=True) == []
+
+    asyncio.run(run())
+
+
+def test_contribution_ids_survive_restart(ws_repo, inbox_mem_reset):
+    """_SEQ resets to zero on restart; ids allocated after a reload must
+    continue ABOVE the loaded rows (a duplicate id would make review match
+    the wrong row)."""
+    first = desks_mod.add_contribution(str(ws_repo), 5, branch="b", base_commit="c",
+                                       summary="s", desk_dir="d")
+    assert first["id"] == 1
+    desks_mod._INBOX.clear()  # simulate a restart (mirror still on disk)
+    second = desks_mod.add_contribution(str(ws_repo), 6, branch="b2", base_commit="c",
+                                        summary="s2", desk_dir="d")
+    assert second["id"] == 2, "id must not collide after a restart"
+
+
+def test_worker_env_hides_system_gh(tmp_path, monkeypatch):
+    """gh exclusion covers SYSTEM installs too: any PATH dir carrying a gh
+    executable is dropped, not just the bundled one."""
+    from backend.agent import tools as tools_mod
+
+    gh_dir = tmp_path / "system-tools"
+    gh_dir.mkdir()
+    (gh_dir / ("gh.exe" if os.name == "nt" else "gh")).write_text("", encoding="utf-8")
+    clean_dir = tmp_path / "clean-tools"
+    clean_dir.mkdir()
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join([str(gh_dir), str(clean_dir), "C:\\elsewhere"]),
+    )
+    env = tools_mod._worker_env()
+    parts = env["PATH"].split(os.pathsep)
+    assert str(gh_dir) not in parts
+    assert str(clean_dir) in parts
+    assert "C:\\elsewhere" in parts
+
+
+def test_git_helpers_scrub_repo_selection_vars(ws_repo, monkeypatch):
+    """GIT_DIR and friends are stripped from every desk git subprocess, so a
+    parent-process export cannot redirect a desk command at another repo.
+    Everything else rides through."""
+    import asyncio
+
+    async def run():
+        seat = await desks_mod.claim_desk(str(ws_repo))
+        monkeypatch.setenv("GIT_DIR", "C:/definitely-not-a-repo")
+        monkeypatch.setenv("YAAH_PROBE_VAR", "kept")
+        env = desks_mod._git_env()
+        assert "GIT_DIR" not in env
+        assert env.get("YAAH_PROBE_VAR") == "kept"
+        rc, out = await desks_mod._run_git(
+            ["rev-parse", "--show-toplevel"], cwd=Path(seat["dir"])
+        )
+        assert rc == 0
+        assert "definitely-not-a-repo" not in out
+        assert str(Path(seat["dir"]).resolve()).lower().replace("\\", "/")             in out.lower().replace("\\", "/")
+
+    asyncio.run(run())
+
+
+def test_merge_defers_while_another_root_turn_runs(ws_repo, monkeypatch):
+    """#681: dirty checkout OR active root-capable turn ⇒ defer. The merge
+    defers while another conversation in the workspace is mid-turn, and
+    proceeds once it is not."""
+    import asyncio
+    import backend.main as main_mod
+    from backend.agent import loop, tools as tools_mod
+    from backend.db.database import create_conversation
+
+    async def run():
+        # The submit and the merge-success wake real conversations; stub the
+        # wake primitive so no live background turn fires from this test.
+        async def fake_wake(cid, prompt, source=""):
+            return "queued"
+
+        monkeypatch.setattr(main_mod, "wake_conversation", fake_wake)
+        parent = await create_conversation("parent", workspace=str(ws_repo))
+        cid, wseat = await _make_worker(str(ws_repo), parent_id=parent)
+        blocker = await create_conversation("blocker", workspace=str(ws_repo))
+        # The contribution travels the WORKER'S DESK branch — commit there,
+        # not in the workspace checkout.
+        desk = Path(wseat["dir"])
+        _git(desk, "checkout", "-q", "-b", "feat3")
+        (desk / "feat3.txt").write_text("x", encoding="utf-8")
+        _git(desk, "add", ".")
+        _git(desk, "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-q", "-m", "feat3")
+        result = await tools_mod.execute_tool(
+            "submit_contribution",
+            {"summary": "feat3", "branch": "feat3"},
+            str(ws_repo), conversation_id=cid,
+        )
+        assert result.get("submitted") is True, result
+        contrib_id = result["contribution_id"]
+
+        running = {int(blocker)}
+
+        def fake_is_running(conversation_id):
+            return int(conversation_id) in running
+
+        monkeypatch.setattr(loop, "agent_is_running", fake_is_running)
+        result = await tools_mod.execute_tool(
+            "review_contribution",
+            {"contribution_id": contrib_id, "decision": "merge"},
+            str(ws_repo), conversation_id=parent,
+        )
+        assert result.get("deferred") is True, result
+        assert "mid-turn" in result.get("error", "")
+
+        running.clear()
+        result = await tools_mod.execute_tool(
+            "review_contribution",
+            {"contribution_id": contrib_id, "decision": "merge"},
+            str(ws_repo), conversation_id=parent,
+        )
+        assert result.get("merged") is True, result
+
+    asyncio.run(run())
+
+
+def test_wake_route_is_a_real_handler():
+    """The /wake decorator must sit on a HANDLER (it once decorated the
+    next declaration — the InboxReviewRequest model — leaving the route
+    dead: every POST 422'd against the model as a body). The handler
+    accepts {message} and resolves the conversation: unknown id => 404
+    with the handler's own detail, not a validation error."""
+    import asyncio
+
+    async def run():
+        from httpx import ASGITransport, AsyncClient
+
+        from backend.main import app
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post(
+                "/api/conversations/999999/wake", json={"message": "hi"}
+            )
+        assert response.status_code == 404, response.text
+        assert response.json()["detail"] == "conversation not found", response.text
+
     asyncio.run(run())

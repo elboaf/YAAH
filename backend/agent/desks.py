@@ -19,13 +19,36 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 from backend.agent.gitproc import git_exe
 
 log = logging.getLogger(__name__)
+
+# Repository-selection variables: a parent process exporting any of these
+# could silently redirect a desk or checkout git command at a DIFFERENT
+# repository than the cwd it names. Every subprocess helper strips them;
+# credential and transport settings ride through untouched.
+_GIT_REPO_SELECTION_VARS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_PREFIX",
+)
+
+
+def _git_env() -> dict:
+    env = dict(os.environ)
+    for name in _GIT_REPO_SELECTION_VARS:
+        env.pop(name, None)
+    return env
 
 DESKS_ROOT = Path.home() / ".yaah" / "desks"
 DEFAULT_POOL_CAP = 4
@@ -37,10 +60,17 @@ DEFAULT_POOL_CAP = 4
 DESK_MARKER = ".git/yaah-desk.json"
 
 # Inbox rows (per workspace). In-memory with a JSON mirror per workspace so
-# a backend restart drains, not drops. A row is pending from creation until
-# status in {merged, rejected, abandoned, stale}; one pending per worker.
+# a backend restart drains, not drops. A row is OPEN from creation until it
+# reaches a terminal status: merge or explicit abandon close it; a rejection
+# moves it to 'revision' (still open — the author revises and resubmits the
+# SAME row); one open (pending or revision) contribution per worker.
 _INBOX: dict[str, list[dict]] = {}
 _SEQ = [0]
+# Per-workspace spawn serialization (in-process; the marker reservation
+# covers cross-process) and how long a seat reservation may stay unclaimed
+# before a crashed spawner's seat becomes reusable.
+_SEAT_LOCKS: dict[str | None, asyncio.Lock] = {}
+RESERVATION_TTL = 120.0  # seconds
 
 
 def pool_key(workspace: str | None) -> str:
@@ -104,19 +134,32 @@ def _load_inbox(workspace: str | None) -> list[dict]:
         except Exception:  # noqa: BLE001 — a corrupt mirror must not block boot
             log.warning("desk inbox mirror unreadable: %s", p)
     _INBOX[key] = rows
+    # The id sequence must survive restarts above every loaded row id —
+    # a duplicate id would make review_contribution match the wrong row.
+    for row in rows:
+        try:
+            rid = int(row.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if rid > _SEQ[0]:
+            _SEQ[0] = rid
     return rows
 
 
 def _save_inbox(workspace: str | None) -> None:
+    """Persist the mirror ATOMICALLY (temp + replace): write_text would
+    truncate the old mirror first, so a failed write could leave a damaged
+    file that _load_inbox reads as an empty inbox — accepted contributions
+    would silently vanish. Persistence failure propagates so a caller can
+    roll back its in-memory mutation instead of reporting success."""
     p = inbox_path(workspace)
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(
-            json.dumps(_INBOX.get(pool_key(workspace), []), indent=2),
-            encoding="utf-8",
-        )
-    except Exception:  # noqa: BLE001 — the memory copy stays authoritative
-        log.warning("desk inbox mirror write failed: %s", p)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(
+        json.dumps(_INBOX.get(pool_key(workspace), []), indent=2),
+        encoding="utf-8",
+    )
+    os.replace(tmp, p)
 
 
 def pending_contribution(workspace: str | None, worker_conv_id: int) -> dict | None:
@@ -158,8 +201,13 @@ def add_contribution(
         "created_at": "",
         "review": "",
     }
-    _load_inbox(workspace).append(row)
-    _save_inbox(workspace)
+    rows = _load_inbox(workspace)
+    rows.append(row)
+    try:
+        _save_inbox(workspace)
+    except Exception:
+        rows.pop()  # roll back the in-memory append; submission did not land
+        raise
     return row
 
 
@@ -189,6 +237,7 @@ async def _run_git(args: list[str], cwd: Path | None = None) -> tuple[int, str]:
     proc = await asyncio.create_subprocess_exec(
         exe, "--no-optional-locks", *args,
         cwd=str(cwd) if cwd is not None else None,
+        env=_git_env(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
@@ -235,7 +284,11 @@ async def handover(workspace: str | None, seat_dir: Path) -> dict:
     """Prepare a desk for its next occupant: fetch from the workspace repo
     and reset tracked files to the workspace's current state (its current
     branch + HEAD). Untracked files (node_modules, builds) and old branches
-    survive; a predecessor's uncommitted edits do not."""
+    survive; a predecessor's uncommitted edits do not.
+
+    Failures are LOUD: a seat whose fetch or reset failed stays unassigned
+    (no marker) so a retry re-runs the whole handover — a stale desk must
+    never be handed to a new worker as if it were current."""
     from backend.agent.tools import workspace_root
 
     source = workspace_root(workspace)
@@ -243,24 +296,49 @@ async def handover(workspace: str | None, seat_dir: Path) -> dict:
     notes: list[str] = []
     rc, out = await _run_git(["fetch", "workspace", "--prune"], cwd=seat_dir)
     if rc != 0:
-        notes.append(f"fetch failed: {out.strip()[:200]}")
-    # The checkout's HEAD travels through the fetch; reset the seat's
-    # current branch to it, hard — tracked files only, untracked survive.
+        return {
+            "branch": branch,
+            "notes": [f"fetch failed: {out.strip()[:200]}"],
+            "failed": True,
+        }
+
+    # Untracked-vs-tracked collisions need no special handling: unlike
+    # `reset --hard <ref>` (which silently overwrites an untracked file
+    # sitting at a path the target commit tracks), `checkout -B` REFUSES
+    # such a handover ("untracked working tree files would be overwritten")
+    # — the files survive untouched and the failure surfaces as a failed
+    # handover below, recoverable by moving the file aside and re-seating.
+    #
+    # First drop a predecessor's uncommitted TRACKED edits (the contract:
+    # they do not survive a handover). A ref-less `git reset --hard` resets
+    # index + worktree to HEAD without moving ANY branch ref — the branch
+    # moving hazard below is about `reset --hard <ref>`, not this form.
+    await _run_git(["reset", "--hard"], cwd=seat_dir)
+    #
+    # Then repoint THE INTEGRATION BRANCH, not whichever branch a
+    # predecessor left checked out: `git reset --hard <ref>` moves the
+    # CURRENT branch (a predecessor's work branch would lose its tip, and
+    # the later checkout of the local integration branch would land on
+    # stale code). `checkout -B` repoints the integration branch to the
+    # fetched state and selects it in one step, leaving every other local
+    # branch untouched.
     rc, out = await _run_git(
-        ["reset", "--hard", "workspace/" + branch], cwd=seat_dir
+        ["checkout", "-B", branch, f"workspace/{branch}"], cwd=seat_dir
     )
     if rc != 0:
-        # Seat on an unrelated branch: move it to the workspace branch first.
-        rc2, out2 = await _run_git(
-            ["checkout", "-B", branch, "workspace/" + branch], cwd=seat_dir
-        )
-        if rc2 != 0:
-            notes.append(f"reset failed: {out2.strip()[:200]}")
-    else:
-        await _run_git(["checkout", branch], cwd=seat_dir)
-    # Drop branch leftover debris only if a stale rebase/merge state blocks
-    # the next occupant; git refuses otherwise and the note carries it.
+        notes.append(f"reset failed: {out.strip()[:200]}")
+        return {"branch": branch, "notes": notes, "failed": True}
     return {"branch": branch, "notes": notes}
+
+
+def _reservation_expired(data: dict) -> bool:
+    """A seat reservation older than RESERVATION_TTL seconds is stale (its
+    spawner died between reserve and seat) and may be taken over."""
+    try:
+        reserved_at = float(data.get("reserved_at") or 0)
+    except (TypeError, ValueError):
+        return True
+    return (time.time() - reserved_at) > RESERVATION_TTL
 
 
 async def claim_desk(workspace: str | None) -> dict:
@@ -291,8 +369,28 @@ async def claim_desk(workspace: str | None) -> dict:
             except Exception:  # noqa: BLE001 — unreadable marker = unseated
                 occupant = None
         if occupant:
-            continue
+            # A seat reserved by an in-flight spawn (or by a spawner that
+            # died within the TTL) is NOT free; past the TTL it is stale
+            # and reusable, so a crashed spawn never leaks a seat forever.
+            if str(occupant).isdigit():
+                continue
+            if marker.is_file():
+                try:
+                    reserved = json.loads(marker.read_text(encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    reserved = {}
+                if not _reservation_expired(reserved):
+                    continue
         hand = await handover(workspace, seat_dir)
+        if hand.get("failed"):
+            # Leave the seat WITHOUT a marker: a failed handover must not
+            # hand a stale desk to a new worker as if it were current.
+            # The note travels to the spawn caller; a retry re-runs the
+            # whole handover.
+            raise RuntimeError(
+                "desk handover failed — the seat was left unassigned: "
+                + "; ".join(hand.get("notes") or ["unknown failure"])
+            )
         await _write_marker(seat_dir, None)
         return {
             "seat": int(seat_dir.name),
@@ -322,7 +420,9 @@ async def claim_desk(workspace: str | None) -> dict:
     }
 
 
-async def _write_marker(seat_dir: Path, worker_conversation_id: int | None) -> None:
+async def _write_marker(
+    seat_dir: Path, worker_conversation_id: int | None, reserved_by: str | None = None
+) -> None:
     marker = seat_dir / DESK_MARKER
     data: dict = {"worker_conversation_id": worker_conversation_id}
     try:
@@ -331,15 +431,69 @@ async def _write_marker(seat_dir: Path, worker_conversation_id: int | None) -> N
     except Exception:  # noqa: BLE001
         data = {}
     data["worker_conversation_id"] = worker_conversation_id
+    if reserved_by:
+        data["reserved_by"] = reserved_by
+        data["reserved_at"] = time.time()
+    else:
+        data.pop("reserved_by", None)
+        data.pop("reserved_at", None)
     marker.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-async def seat_worker(workspace: str | None, worker_conversation_id: int) -> dict:
-    """Assign a desk to a worker chat: claim a seat, then stamp the marker
-    so the seat is occupied until the worker chat is deleted."""
+async def claim_desk_for_spawn(workspace: str | None) -> dict:
+    """claim_desk with a race-safe reservation: the seat is marked with a
+    non-free reservation BEFORE the spawn flow yields, so two concurrent
+    spawns can never receive the same desk (a plain `0` occupant reads as
+    free to the next claimer). Convert the reservation to the real worker
+    id with `seat_worker(ws, real_id)`; free it with `abandon_reservation`
+    if conversation creation failed."""
+    import uuid
+
+    # "r" prefix: a token can never look like a numeric conversation id,
+    # so the occupancy check can always tell a reservation from an occupant.
+    token = "r" + uuid.uuid4().hex[:15]
     seat = await claim_desk(workspace)
-    await _write_marker(Path(seat["dir"]), worker_conversation_id)
+    try:
+        await _write_marker(Path(seat["dir"]), token, reserved_by=token)
+    except Exception as e:
+        raise RuntimeError(f"seat reservation failed for {seat['dir']}: {e}") from e
+    seat["reservation"] = token
     return seat
+
+
+async def seat_worker(workspace: str | None, worker_conversation_id) -> dict:
+    """Assign a desk to a worker chat: claim a race-safe reservation, then
+    stamp the real worker id so the seat is occupied until the worker chat
+    is deleted. A falsy id keeps the reservation only (spawn_worker's
+    pre-create claim; seat_worker(ws, real_id) converts it). Concurrent
+    spawns serialize on a per-workspace asyncio lock; the non-free
+    reservation marker closes the cross-process gap, and reservations older
+    than RESERVATION_TTL count as stale so a crashed spawner's seat can be
+    reused instead of leaking against the pool cap."""
+    lock = _SEAT_LOCKS.setdefault(workspace, asyncio.Lock())
+    async with lock:
+        seat = await claim_desk_for_spawn(workspace)
+        if worker_conversation_id:
+            await _write_marker(Path(seat["dir"]), worker_conversation_id)
+    return seat
+
+
+async def abandon_reservation(workspace: str | None, seat: dict) -> None:
+    """Free a reserved seat when conversation creation failed, so the desk
+    can be reused instead of leaking against the pool cap."""
+    token = (seat or {}).get("reservation")
+    dir_path = Path((seat or {}).get("dir") or "")
+    if not token or not dir_path:
+        return
+    lock = _SEAT_LOCKS.setdefault(workspace, asyncio.Lock())
+    async with lock:
+        marker = dir_path / DESK_MARKER
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            data = {}
+        if data.get("reserved_by") == token:
+            await _write_marker(dir_path, None)
 
 
 async def release_desk(workspace: str | None, worker_conversation_id: int) -> dict | None:
@@ -413,7 +567,7 @@ def _run_git_now(args: list[str], cwd: Path) -> str:
     exe = git_exe() or "git"
     out = subprocess.run(
         [exe, "--no-optional-locks", *args], cwd=str(cwd),
-        capture_output=True, text=True, timeout=20,
+        env=_git_env(), capture_output=True, text=True, timeout=20,
     )
     return (out.stdout or "").strip()
 
@@ -461,6 +615,31 @@ def desk_root_for_worker(workspace: str | None, worker_conversation_id: int) -> 
     """The desk dir for a seated worker, or None when unseated."""
     seat = find_seat(workspace, worker_conversation_id)
     return seat["dir"] if seat else None
+
+
+async def _workspace_has_active_turn(workspace: str, exclude_conv: int) -> bool:
+    """True when another root-capable conversation in this workspace has a
+    turn in flight. The workspace→conversations mapping comes from the DB
+    (the run registry is keyed by conversation id only)."""
+    from backend.db.database import list_conversations
+    from backend.agent.loop import agent_is_running
+
+    try:
+        rows = await list_conversations()
+    except Exception:  # noqa: BLE001 — fail OPEN: defer rather than merge
+        log.exception("active-turn probe failed; deferring the merge")
+        return True
+    for row in rows or []:
+        cid = row.get("id")
+        if cid is None or int(cid) == int(exclude_conv):
+            continue
+        if (row.get("workspace") or "").strip() != workspace:
+            continue
+        if (row.get("chat_type") or "chat") == "worker":
+            continue  # workers never touch the checkout
+        if agent_is_running(int(cid)):
+            return True
+    return False
 
 
 
@@ -512,16 +691,21 @@ async def spawn_worker_tool(
             "unavailable without one"
         }
     try:
-        seat = await seat_worker(conv_ws, 0)  # claimed before the row exists
+        seat = await seat_worker(conv_ws, 0)  # reserved before the row exists
     except RuntimeError as e:
         return {"error": str(e)}
-    worker_id = await create_conversation(
-        title=(name or "Worker").strip()[:80] or "Worker",
-        workspace=conv_ws,
-        chat_type="worker",
-        worker_parent_id=parent_id,
-        desk_dir=seat["dir"],
-    )
+    try:
+        worker_id = await create_conversation(
+            title=(name or "Worker").strip()[:80] or "Worker",
+            workspace=conv_ws,
+            chat_type="worker",
+            worker_parent_id=parent_id,
+            desk_dir=seat["dir"],
+        )
+    except Exception:
+        await abandon_reservation(conv_ws, seat)
+        raise
+    # Convert the reservation to the real occupant.
     await _write_marker(Path(seat["dir"]), worker_id)
     fired = None
     if task and task.strip():
@@ -570,10 +754,6 @@ async def submit_contribution_tool(
     desk_dir = conv.get("desk_dir") or None
     if not desk_dir:
         return {"error": "this worker chat has no desk assigned"}
-    # Preconditions: clean desk, at most one pending contribution.
-    report = clean_desk_report(conv_ws, worker_id)
-    if not report.get("ok"):
-        return {"error": report.get("error", "desk not ready for submit")}
     rc, out = await run_git(desk_dir, "rev-parse", "HEAD")
     if rc != 0:
         return {"error": f"cannot resolve the desk HEAD: {out.strip()[:200]}"}
@@ -581,15 +761,71 @@ async def submit_contribution_tool(
     if not (base_commit or "").strip():
         rc, out = await run_git(desk_dir, "merge-base", "workspace/HEAD", head)
         base_commit = out.strip() if rc == 0 and out.strip() else head
-    row = add_contribution(
-        conv_ws,
-        worker_id,
-        branch=branch.strip(),
-        base_commit=base_commit.strip(),
-        summary=summary.strip(),
-        desk_dir=str(desk_dir),
-        title=(title or "").strip(),
+    # Preconditions: clean desk, at most one pending contribution.
+    report = clean_desk_report(conv_ws, worker_id)
+    if not report.get("ok"):
+        return {"error": report.get("error", "desk not ready for submit")}
+    # An OPEN 'revision' row means this submit is the rejection bounce: the
+    # worker revised the branch and is resubmitting the SAME contribution.
+    # Update that row in place (rejection never closed it — only merge or
+    # explicit abandon close a contribution).
+    revising = next(
+        (c for c in _load_inbox(conv_ws)
+         if c.get("worker_conversation_id") == worker_id
+         and c.get("status") == "revision"),
+        None,
     )
+    if revising is not None:
+        update_contribution(
+            conv_ws, int(revising["id"]),
+            summary=summary.strip(),
+            title=(title or "").strip(),
+            branch=branch.strip(),
+            base_commit=base_commit.strip() or revising.get("base_commit", ""),
+            status="pending",
+            review=(revising.get("review") or "") + " | revised: resubmitted",
+        )
+        row = next(
+            (r for r in _load_inbox(conv_ws) if r.get("id") == revising["id"]),
+            revising,
+        )
+        parent_id = conv.get("worker_parent_id")
+        wake = None
+        if parent_id:
+            from backend.main import wake_conversation
+
+            wake = await wake_conversation(
+                int(parent_id),
+                "[developer world] A revised worker contribution is back in "
+                f"the inbox (#{row['id']}, branch {row['branch']}, desk "
+                f"{desk_dir}) — it now reads pending again. Review and merge "
+                f"it with review_contribution. Summary: "
+                f"{row['summary'][:500]}",
+                source="contribution",
+            )
+        return {
+            "submitted": True,
+            "resubmitted": True,
+            "contribution_id": row["id"],
+            "branch": row["branch"],
+            "head": head,
+            "base_commit": row["base_commit"],
+            "wake": wake,
+        }
+    try:
+        row = add_contribution(
+            conv_ws,
+            worker_id,
+            branch=branch.strip(),
+            base_commit=base_commit.strip(),
+            summary=summary.strip(),
+            desk_dir=str(desk_dir),
+            title=(title or "").strip(),
+        )
+    except Exception as e:
+        # The row is not durably persisted — submission did NOT land and is
+        # never reported successful; the worker retries when storage works.
+        return {"error": f"submit failed: the inbox could not be saved ({e})"}
     parent_id = conv.get("worker_parent_id")
     wake = None
     if parent_id:
@@ -705,6 +941,21 @@ async def review_contribution_tool(
 
     if decision == "merge":
         # A dirty checkout defers: user WIP is never integrated through.
+        # So is an active root-capable turn on the same workspace (#681:
+        # "dirty checkout or active root-capable turn ⇒ defer") — merging
+        # under a running turn can integrate work into a checkout the turn
+        # is concurrently editing. The calling conversation is excluded so
+        # a supervisor never blocks its own review.
+        if conversation_id is not None:
+            busy = await _workspace_has_active_turn(conv_ws, int(conversation_id))
+            if busy:
+                return {
+                    "deferred": True,
+                    "error": (
+                        "another root-capable chat is mid-turn in this "
+                        "workspace — merge later, when its turn completes"
+                    ),
+                }
         rc, status = await run_git(conv_ws, "status", "--porcelain")
         if rc == 0 and status.strip():
             return {
@@ -788,19 +1039,14 @@ async def review_contribution_tool(
     if decision in ("reject", "abandon"):
         update_contribution(
             conv_ws, int(contribution_id),
-            status="rejected" if decision == "reject" else "abandoned",
+            status="revision" if decision == "reject" else "abandoned",
             review=(feedback or "").strip(),
         )
         if worker_id and decision == "reject":
             from backend.main import wake_conversation
 
-            await wake_conversation(
-                worker_id,
-                f"[supervisor] Your contribution #{row.get('id')} "
-                f"({branch}) was REJECTED. Feedback: "
-                f"{(feedback or '(none given)').strip()}. Fix the work on "
-                "the branch and submit again, or move on.",
-                source="supervisor",
+            await wake_contribution_bounce(
+                worker_id, row, branch, feedback,
             )
         return {
             "decision": decision,
@@ -811,3 +1057,23 @@ async def review_contribution_tool(
         "error": "decision must be one of: merge, reject, abandon "
         "(a rejection bounces to the authoring worker with your feedback)"
     }
+
+
+async def wake_contribution_bounce(
+    worker_id: int, row: dict, branch: str, feedback: str
+) -> str:
+    """Wake the authoring worker: its contribution was rejected. The row
+    stays OPEN in 'revision' (rejection does not close — only merge or
+    explicit abandon do), so resubmission UPDATES the same row instead of
+    filing a duplicate."""
+    from backend.main import wake_conversation
+
+    return await wake_conversation(
+        worker_id,
+        f"[supervisor] Your contribution #{row.get('id')} "
+        f"({branch}) was REJECTED. Feedback: "
+        f"{(feedback or '(none given)').strip()}. Revise the work on "
+        "the branch and submit_contribution again — the resubmit updates "
+        "the same inbox row — or abandon it to move on.",
+        source="supervisor",
+    )

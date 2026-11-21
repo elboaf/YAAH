@@ -321,6 +321,7 @@ from backend.db.database import (
     get_conversation,
     get_messages,
     list_conversations,
+    list_worker_children,
     list_workspaces,
     move_conversation,
     touch_workspace,
@@ -1106,6 +1107,15 @@ async def api_spawn_worker(body: WorkerSpawnRequest):
 
 
 @app.post("/api/conversations/{conversation_id}/wake")
+async def api_wake_conversation(conversation_id: int, body: WakeRequest):
+    """Frontend wake button (ADR-0022): start or queue a turn on another
+    chat's behalf and report the delivery outcome."""
+    delivery = await wake_conversation(
+        conversation_id, body.message, source="ui"
+    )
+    if delivery == "gone":
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"delivery": delivery}
 
 
 class InboxReviewRequest(BaseModel):
@@ -1151,7 +1161,10 @@ async def api_delete_conversation(conversation_id: int):
                     conv_ws, row["id"], status="abandoned",
                     review="worker chat deleted",
                 )
-            desks_mod.release_desk(conv_ws, conversation_id)
+            # release_desk is a coroutine: without the await its body never
+            # runs, the stale marker stays, the seat counts against the
+            # pool cap forever, and no cleanup path clears it.
+            await desks_mod.release_desk(conv_ws, conversation_id)
     try:
         ok = await delete_conversation(conversation_id)
     except RemoteProtocolError as error:
@@ -1678,7 +1691,10 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
         """Consume one wake-fired run's stream. The loop persists the
         transcript itself; the stream has no UI — except the kind=busy
         refusal, which is the idle->busy race signal and re-routes the
-        prompt into the running turn's queue."""
+        prompt into the running turn's queue, and the queued_autosend
+        hand-off, whose items would otherwise be dropped (nothing is
+        draining a wake-fired turn's queue once the run completes — the
+        browser's follow-up-turn path does not run here)."""
         try:
             async for line in run_agent(
                 conversation_id,
@@ -1691,6 +1707,35 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
                 if '"kind": "busy"' in line or '"kind":"busy"' in line:
                     loop_mod.enqueue_message(conversation_id, prompt)
                     return
+                if '"type": "queued_autosend"' in line or '"type":"queued_autosend"' in line:
+                    # The loop already re-persists any drained items it
+                    # hands off here; re-enqueue them and fire a follow-up
+                    # wake so they actually run. The follow-up wake lands
+                    # on an idle conversation now (this run completed), so
+                    # it starts a fresh turn and can never self-deadlock.
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    items = event.get("items") or []
+                    if not items:
+                        continue
+                    for item in items:
+                        loop_mod.enqueue_message(
+                            conversation_id,
+                            item.get("text") or "",
+                            skills=item.get("skills") or [],
+                            images=item.get("images") or [],
+                            attachments=item.get("attachments") or [],
+                        )
+                    asyncio.create_task(
+                        wake_conversation(
+                            conversation_id,
+                            WAKE_RESUME_PROMPT,
+                            source="wake-resume",
+                        )
+                    )
+                    return
         except Exception:  # noqa: BLE001 — a failed wake must not kill its caller
             log.exception("wake-fired run on conversation %s failed (%s)", conversation_id, source)
 
@@ -1698,6 +1743,15 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
     _WAKE_RUN_TASKS.add(task)
     task.add_done_callback(_WAKE_RUN_TASKS.discard)
     return "started"
+
+
+# What a follow-up wake says when it restarts a turn to run the queued
+# messages the previous turn handed off (queued_autosend). The enqueued
+# texts ride the queue; this prompt just gets the turn going.
+WAKE_RESUME_PROMPT = (
+    "[wake] Your previous turn queued follow-up messages that never ran. "
+    "They are back in your queue — continue where the turn left off."
+)
 
 
 def _worker_first_prompt(task: str) -> str:

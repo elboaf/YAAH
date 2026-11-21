@@ -286,6 +286,28 @@ export const wakeConversation = (id: number, message: string) =>
     body: JSON.stringify({ message }),
   })
 
+/** ADR-0022: spawn a worker chat for a workspace (the Workers dialog's
+ * panel form — goes through the shared client so Tauri desktop routing
+ * works; origin-relative fetch would hit the frontend origin). */
+export const spawnWorker = (body: { workspace: string; task: string; name?: string }) =>
+  api<{ worker_conversation_id: number; desk?: string; seat?: number; error?: string }>(
+    `/api/workers/spawn`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+
+/** ADR-0022: human-side review of one inbox row. The endpoint REQUIRES the
+ * workspace query parameter (HTTP 400 without it). */
+export const reviewContribution = (
+  workspace: string,
+  contributionId: number,
+  decision: 'merge' | 'reject' | 'abandon',
+  feedback = '',
+) =>
+  api<{ deferred?: boolean; detail?: string; merged?: boolean; decision?: string }>(
+    `/api/workspaces/inbox/${contributionId}/review?workspace=${encodeURIComponent(workspace)}`,
+    { method: 'POST', body: JSON.stringify({ decision, feedback }) },
+  )
+
 export interface StoredMessage {  id: number
   role: string
   content: string

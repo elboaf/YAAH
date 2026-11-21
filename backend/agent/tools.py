@@ -44,24 +44,25 @@ def _tool_env() -> dict:
 
 
 def _worker_env() -> dict:
-    """Shell environment for worker chats (ADR-0022): no gh.
-
-    Starts from a plain environ copy, drops every PATH entry that names a
-    bundled gh bin dir, and removes the gh auth env vars. A system-wide gh
-    outside the bundle is unreachable from the PATH this produces; even if
-    one is found, a desk has no origin remote and no credentials to push
-    with — the overnight-agent sin stays structurally impossible."""
-    from backend.agent.ghenv import bundled_gh_bin_dir
-
+    """Shell environment for worker chats (ADR-0022): no gh — not the
+    bundled one and not a system install either. Drops every PATH entry
+    that names a gh-bearing directory (bundle AND system locations that
+    carry a gh executable) and removes the gh auth env vars. A desk has no
+    origin remote, but a system gh would still find the user's existing
+    `gh auth login` credential store — so PATH-level exclusion is the
+    guard, not just token-variable removal."""
     env = dict(os.environ)
-    gh_bin = bundled_gh_bin_dir()
-    if gh_bin:
-        parts = env.get("PATH", "").split(os.pathsep)
-        parts = [
-            p for p in parts
-            if Path(p).resolve() != Path(gh_bin).resolve()
-        ]
-        env["PATH"] = os.pathsep.join(parts)
+    parts = env.get("PATH", "").split(os.pathsep)
+    kept: list[str] = []
+    for p in parts:
+        if not p:
+            kept.append(p)
+            continue
+        probe = Path(p) / ("gh.exe" if os.name == "nt" else "gh")
+        if probe.exists():
+            continue  # a gh executable lives here — the worker must not see it
+        kept.append(p)
+    env["PATH"] = os.pathsep.join(kept)
     for key in list(env):
         if key.upper().startswith("GH_") or key.upper() == "GITHUB_TOKEN":
             env.pop(key, None)
@@ -1715,6 +1716,22 @@ async def search_conversation_history(
     from backend.db.database import search_conversations_in_workspace
     from backend.db.database import get_related_workspaces
     from backend.agent.search_semantic import search_with_semantic
+
+    # Worker turns re-root the WORKSPACE at the desk, but worker ROWS store
+    # the project workspace: a workspace-reach search keyed on the desk path
+    # matches no conversation rows and silently returns nothing. Resolve the
+    # real project workspace once, here, and search from there.
+    from backend.db.database import get_conversation
+
+    if workspace_reach == "workspace" and conversation_id is not None:
+        try:
+            conv = await get_conversation(int(conversation_id))
+        except Exception:  # noqa: BLE001 — search must keep working
+            conv = None
+        if conv is not None and (conv.get("chat_type") or "chat") == "worker":
+            project_ws = (conv.get("workspace") or "").strip()
+            if project_ws and not project_ws.startswith("remote:"):
+                workspace = project_ws
 
     if workspace_reach == "workspace":
         async def ws_keyword_fn(q: str, n: int) -> dict:
