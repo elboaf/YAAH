@@ -25,6 +25,8 @@ import {
   updateConversation,
   listWorkers,
   getWorkspaceInbox,
+  spawnWorker,
+  reviewContribution,
   type InboxRow,
   type DeskPoolStatus,
   submitAnswer,
@@ -5485,6 +5487,7 @@ function WorkersDialog({
   const pushToast = useAgent((s) => s.pushToast)
   const setConversationId = useAgent((s) => s.setConversationId)
   const loadHistory = useAgent((s) => s.loadHistory)
+  const setWorkspace = useAgent((s) => s.setWorkspace)
   const [workers, setWorkers] = useState<Array<{ id: number; title: string; workspace: string | null; desk_dir?: string | null; updated_at: string; chat_type?: string }>>([])
   const [inbox, setInbox] = useState<{ pending: InboxRow[]; pool: DeskPoolStatus } | null>(null)
   const [task, setTask] = useState('')
@@ -5542,16 +5545,12 @@ function WorkersDialog({
       // drives the same backend primitive directly so spawning works even
       // when no conversation is open (the worker is parentless then — the
       // human supervises through this panel).
-      const res = await fetch(`/api/workers/spawn`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspace: wsPath, task: task.trim(), name: workerName.trim() }),
+      const res = await spawnWorker({
+        workspace: wsPath,
+        task: task.trim(),
+        name: workerName.trim(),
       })
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null)
-        throw new Error(detail?.detail ?? `spawn failed (${res.status})`)
-      }
-      const created = await res.json()
+      const created = res
       pushToast({ kind: 'success', title: 'Worker spawned', body: `Seated at desk ${created.desk ?? ''}` })
       setTask('')
       setWorkerName('')
@@ -5566,16 +5565,7 @@ function WorkersDialog({
   const act = async (row: InboxRow, decision: 'merge' | 'reject' | 'abandon', feedback = '') => {
     setBusy(true)
     try {
-      const res = await fetch(`/api/workspaces/inbox/${row.id}/review`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision, feedback }),
-      })
-      if (!res.ok) {
-        const detail = await res.json().catch(() => null)
-        throw new Error(detail?.detail ?? `review failed (${res.status})`)
-      }
-      const out = await res.json()
+      const out = await reviewContribution(wsPath, row.id, decision, feedback)
       if (out.deferred) {
         pushToast({ kind: 'error', title: 'Deferred', body: out.detail ?? 'checkout dirty' })
       } else {
@@ -5591,7 +5581,11 @@ function WorkersDialog({
     }
   }
 
-  const openWorker = (id: number) => {
+  const openWorker = (id: number, workerWs: string | null) => {
+    // Adopt the worker's workspace before opening it: the store's selected
+    // workspace drives workspace-dependent UI and file previews, and a
+    // worker from another workspace must not render under the wrong one.
+    if (workerWs && workerWs !== wsPath) setWorkspace(workerWs)
     setConversationId(id)
     getMessages(id)
       .then((rows) => loadHistory(id, rows))
@@ -5626,7 +5620,7 @@ function WorkersDialog({
                   <button
                     className="truncate font-mono text-xs text-zinc-200 hover:text-zinc-100"
                     title="Open this worker chat"
-                    onClick={() => openWorker(w.id)}
+                    onClick={() => openWorker(w.id, w.workspace)}
                   >
                     {w.title}
                   </button>
