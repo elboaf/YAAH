@@ -40,6 +40,7 @@ from backend.agent.tools import (
     CONTEXT_TOOLS,
     USER_TEXT_TOOLS,
     MEMORY_TOOLS,
+    WORKER_WORLD_TOOLS,
     execute_tool,
     get_schemas,
     memory_workspace_for,
@@ -1521,10 +1522,11 @@ async def _execute_with_progress(
         queue.put_nowait(text)
 
     tool_kwargs = {"on_chunk": on_chunk}
-    if name in CONTEXT_TOOLS:
+    if name in CONTEXT_TOOLS or name in WORKER_WORLD_TOOLS:
         # Per-tool context: history search scopes to this conversation;
-        # branch_select stores the chat's own selector (#277). The
-        # injection itself lives in execute_tool (#303) so every path
+        # branch_select stores the chat's own selector (#277). Worker tools
+        # need conversation identity for spawn/submit/review (#303). The
+        # injection itself lives in execute_tool so every path
         # (direct, gate re-exec, sub-agents) gets it — this kwarg feeds it.
         tool_kwargs["conversation_id"] = conversation_id
     if name in MEMORY_TOOLS:
