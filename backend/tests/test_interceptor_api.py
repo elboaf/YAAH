@@ -444,3 +444,65 @@ async def test_concurrent_installs_serialize_on_one_flow(client, monkeypatch):
     assert codes == [200, 200]
     assert inside["now"] is False
     assert not problems, problems
+
+
+# --- cross-origin refusal (#776) --------------------------------------------
+#
+# The install route is the only route that downloads and silently runs a
+# third-party installer, and it takes no body -- so a cross-origin page can
+# reach it as a CORS *simple* request (no preflight), and the opaque reply
+# does not stop the side effect. The route therefore refuses any browser
+# Origin that is not the YAAH UI. A non-browser caller sends no Origin and
+# is unaffected (that is the whole discrimination -- there is no secret to
+# share with the legitimate callers).
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["http://evil.example", "https://evil.example", "null", "http://127.0.0.1.evil.example"],
+)
+def test_install_refuses_foreign_browser_origin_before_the_flow(
+    client, monkeypatch, origin
+):
+    install_calls = _fake_install(monkeypatch, {"installed": True})
+    _fake_status(monkeypatch)
+    r = client.post("/api/interceptor/install", headers={"Origin": origin})
+    assert r.status_code == 403, (origin, r.text)
+    assert r.json()["detail"]["code"] == "cross_origin_refused"
+    # The refusal lands BEFORE the manager seam: nothing was downloaded,
+    # nothing was run.
+    assert install_calls["install"] == 0
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["http://localhost:1420", "http://tauri.localhost", "tauri://localhost"],
+)
+def test_install_allows_the_ui_origin(client, monkeypatch, origin):
+    _fake_install(monkeypatch, {"installed": True, "did_install": True})
+    _fake_status(monkeypatch)
+    r = client.post("/api/interceptor/install", headers={"Origin": origin})
+    assert r.status_code == 200, (origin, r.text)
+
+
+def test_install_allows_a_caller_that_sends_no_origin(client, monkeypatch):
+    """curl, the headless server's web surface, the remote exec proxy and
+    this test client all send no Origin. The route must stay open to them
+    (the discrimination is 'did a browser page ask', not 'is this a
+    browser')."""
+    _fake_install(monkeypatch, {"installed": True, "did_install": True})
+    _fake_status(monkeypatch)
+    r = client.post("/api/interceptor/install")
+    assert r.status_code == 200, r.text
+
+
+def test_install_origin_check_shares_the_cors_pattern():
+    """One pattern, two consumers: drift between the CORS regex and the
+    install origin check would silently reopen either the CSRF hole (check
+    narrower) or a real UI (check wider). Assert they are the same object."""
+    import backend.main as mainmod
+
+    cors = next(
+        m for m in mainmod.app.user_middleware if "CORSMiddleware" in str(m.cls)
+    )
+    assert cors.kwargs["allow_origin_regex"] == mainmod._UI_ORIGIN_RE.pattern

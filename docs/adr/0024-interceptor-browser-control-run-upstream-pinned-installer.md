@@ -67,8 +67,37 @@ of someone else's payload?
    since the skills loader hides dangling entries. Wiring it in is tracked
    for the uninstaller side.)
 
+5. **Host-owner only (#776).** The install and unlink routes are reachable
+   by this machine's owner and by nobody else — in two independent ways,
+   because they fail differently:
+
+   - **No remote peer.** The network gate refuses `/api/interceptor/*` for
+     any authenticated remote peer (409
+     `remote_interceptor_not_enabled`), the same fail-closed namespace
+     treatment `/api/agent` already gets. No remote surface consumes these
+     routes: a paired device drives the host through `/api/remote/...`,
+     so nothing is lost by refusing them. Without this, a paired device
+     holding the passphrase could make the host download ~55 MB and run a
+     silent third-party installer — less gating than the deliberately
+     fail-closed agent routes, on the most privileged action in the app.
+   - **No cross-origin page.** The install POST takes no body, so a
+     cross-origin page can issue it as a CORS *simple* request — no
+     preflight — and an opaque reply does not stop the side effect (CORS
+     governs reading, not acting). The route therefore refuses any Origin
+     that is not the YAAH UI (403 `cross_origin_refused`). Callers that
+     send no Origin at all — curl, the headless server's web surface, the
+     remote exec proxy, the test client — are unaffected; the
+     discrimination is "did a browser page ask", not "is this a browser".
+     The check reuses the CORS origin pattern (`_UI_ORIGIN_RE`), so the
+     two cannot drift apart and reopen either the hole or a real UI.
+
+   `remove_links()` was never CSRF-able (DELETE needs a preflight), but it
+   is covered by the same namespace gate.
+
 Consequences: fresh installs fail cleanly when the pinned release is yanked
 (hash mismatch or 404) and the fix is the one-line manifest bump; the feature
 is Windows-only (the Linux build omits the section); fetched at setup time on
 the user's machine, so YAAH's repo, build, and CI/release pipeline carry
-nothing and change nothing.
+nothing and change nothing. The install button remains a local,
+owner-initiated action on the owner's own machine — the two refusals above
+enforce decision 2 against every caller that is not that owner.

@@ -135,12 +135,25 @@ API_PORT = 8765
 
 app = FastAPI(title="AI Coding Agent", version=__version__, lifespan=lifespan)
 
+# The one origin pattern the API treats as its own UI (#776): the Tauri
+# webview differs per platform -- tauri://localhost on macOS,
+# http(s)://tauri.localhost on Windows/Linux -- plus non-Tauri local dev
+# (Vite on localhost:1420) and the loopback forms. Used twice:
+# CORSMiddleware below (may the caller READ a reply) and the Interceptor
+# install route's CSRF origin check (may this request ACT at all). One
+# pattern, so the two can never drift.
+_UI_ORIGIN_RE = re.compile(
+    r"^https?://(localhost|127\.0\.0\.1|tauri\.localhost)(:\d+)?$|^tauri://localhost$"
+)
+
 app.add_middleware(
     CORSMiddleware,
     # The Tauri webview origin differs per platform: tauri://localhost on
     # macOS, http(s)://tauri.localhost on Windows/Linux. Cover vite dev and
     # any tauri origin; the server only ever listens on localhost.
-    allow_origin_regex=r"^https?://(localhost|tauri\.localhost)(:\d+)?$|^tauri://localhost$",
+    # (This adds no reach to a foreign page: CORS is not what stops a side
+    # effect -- the install route's origin check below is.)
+    allow_origin_regex=_UI_ORIGIN_RE.pattern,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -242,6 +255,19 @@ async def remote_auth_guard(request, call_next):
         return JSONResponse(
             {"detail": {"code": "remote_turns_not_enabled",
                          "message": "remote-owned turns are not enabled"}},
+            status_code=409,
+        )
+    # Browser-control install state is host-owner-only (#776). This
+    # namespace holds the most privileged action in the app -- a route that
+    # downloads a third-party installer and runs it silently -- plus the
+    # unlink of the host's own skill junctions. No remote surface consumes
+    # it (a paired device drives the host through /api/remote/...), so it
+    # fail-closes for every method/path, reads included, exactly like the
+    # agent namespace above.
+    if remote_peer and parts[:2] == ["api", "interceptor"]:
+        return JSONResponse(
+            {"detail": {"code": "remote_interceptor_not_enabled",
+                         "message": "browser control is host-owner-only"}},
             status_code=409,
         )
     return await call_next(request)
@@ -1884,15 +1910,41 @@ async def api_interceptor_status():
     return status
 
 
+def _install_origin_refused(origin: str) -> bool:
+    """True when a browser sent an Origin that is not the YAAH UI (#776).
+
+    The install route is a bodiless POST, so a cross-origin page can reach
+    it as a CORS *simple* request: no preflight, and the opaque reply does
+    not stop the side effect (CORSMiddleware governs reading, not acting).
+    A browser always sends Origin on a cross-origin POST; the legitimate
+    non-browser callers -- the headless server's web surface, a Tauri
+    webview fetch, curl, the test client -- send none, and are unaffected.
+    """
+    return bool(origin) and not _UI_ORIGIN_RE.match(origin)
+
+
 @app.post("/api/interceptor/install")
-async def api_interceptor_install():
+async def api_interceptor_install(request: Request):
     """Run the manager's install flow and answer with a clear outcome.
 
     Returns the flow's result plus the post-install status (one shape the
     UI renders directly). Expected failures never surface as a raw 500:
     a refused hash, a failed download, and a failed installer run each
     map to their own code and HTTP status.
+
+    Refused when a browser page that is not the YAAH UI asks for it: this
+    route downloads and silently runs a third-party installer, so a
+    cross-origin page must not be able to trigger it.
     """
+    if _install_origin_refused(request.headers.get("origin") or ""):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "cross_origin_refused",
+                "message": "the Interceptor installer runs only for the "
+                           "YAAH UI, never for a cross-origin page",
+            },
+        )
     try:
         async with _interceptor_install_lock:
             result = await asyncio.to_thread(_interceptor_install.install)
