@@ -723,21 +723,47 @@ async def review_contribution_tool(
         )
         if rc != 0:
             return {"error": f"fetch from desk failed: {out.strip()[:400]}"}
-        # Merge the fetched branch ref, not FETCH_HEAD: the merge must be
-        # the named branch's tip (a second desk branch fetched later would
-        # otherwise clobber FETCH_HEAD before this merge runs).
+        # The merge commit needs a committer identity; a machine without
+        # user.name/user.email configured (a CI runner, a fresh profile)
+        # fails the whole review. Retry once with an explicit identity —
+        # reached only when no identity exists in env/repo/global config,
+        # so a configured machine keeps its own attribution.
         rc, out = await run_git(
             conv_ws, "merge", "--no-ff", "--no-edit",
             f"workspace/{branch}",
         )
+        if rc != 0 and (
+            "Committer identity unknown" in out
+            or "Please tell me who you are" in out
+            or "no email was given" in out
+        ):
+            # One retry with an explicit identity: the supervisor's merge
+            # commit is attributed to the harness, not to a misconfigured
+            # human. Only reached when no identity exists anywhere.
+            rc, out = await run_git(
+                conv_ws, "-c", "user.name=YAAH Supervisor",
+                "-c", "user.email=supervisor@yaah.local",
+                "merge", "--no-ff", "--no-edit",
+                f"workspace/{branch}",
+            )
         if rc != 0:
+            conflict_markers = (
+                "Merge conflict" in out
+                or "Automatic merge failed" in out
+                or "CONFLICT" in out
+            )
+            if conflict_markers:
+                return {
+                    "conflict": True,
+                    "error": (
+                        "merge conflict — conflict resolution is yours: "
+                        "resolve in the checkout, commit, then re-check the "
+                        "inbox row"
+                    ),
+                    "git_output": out.strip()[:600],
+                }
             return {
-                "conflict": True,
-                "error": (
-                    "merge conflict — conflict resolution is yours: resolve "
-                    "in the checkout, commit, then re-check the inbox row"
-                ),
-                "git_output": out.strip()[:600],
+                "error": f"merge failed: {out.strip()[:600]}",
             }
         rc, out = await run_git(conv_ws, "rev-parse", "HEAD")
         update_contribution(
