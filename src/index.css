@@ -494,6 +494,14 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
    its state - armed (typing), streaming, recording/transcribing, drag-over. */
 .imp-composer { position: relative; }
 
+/* Empty composer: the textarea is w-full (100% content width) with px-3 inline
+   padding but no box-sizing override, so the 24px of padding is added OUTSIDE
+   the 100% width. That pushes the field ~24px past its card, which then overflows
+   .imp-composer-wrap and renders a horizontal scrollbar on Linux (WebKit/Blink
+   intrinsic-sizing quirk). border-box folds the padding inside the width so the
+   field never overflows; it also lets the empty state sit flush, not clipped. */
+.imp-composer textarea { box-sizing: border-box; }
+
 /* Dictation presence: the card reports the voice channel. */
 .imp-composer:has(button[aria-pressed="true"]) { border-color: rgba(248, 113, 113, 0.55); }
 .imp-composer:has(button[class*="text-amber-300"]) { border-color: rgba(251, 191, 36, 0.45); }
