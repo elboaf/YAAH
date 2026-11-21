@@ -23,6 +23,12 @@ import {
   deleteConversation,
   moveConversation,
   updateConversation,
+  listWorkers,
+  getWorkspaceInbox,
+  spawnWorker,
+  reviewContribution,
+  type InboxRow,
+  type DeskPoolStatus,
   submitAnswer,
   submitRemoteAnswer,
   listSkills,
@@ -3223,7 +3229,7 @@ export function ConversationList({
   const pendingApprovals = useAgent((s) => s.pendingApprovals)
   const pendingPlanApprovals = useAgent((s) => s.pendingPlanApprovals)
   const finishedByConv = useAgent((s) => s.finishedByConv)
-  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; chat_type?: 'chat' | 'agent' }>>([])
+  const [convs, setConvs] = useState<Array<{ id: number; title: string; workspace: string | null; updated_at: string; chat_type?: 'chat' | 'agent' | 'worker'; desk_dir?: string | null }>>([])
   const [workspaces, setWorkspaces] = useState<WorkspaceRow[]>([])
   // Expanded groups show their chats (capped, with show-more stepping);
   // collapsed groups show the header only. Persisted per workspace.
@@ -3337,6 +3343,8 @@ export function ConversationList({
   // comes from the AgentRunWatcher's store slice.
   const agentChatByConv = useAgent((s) => s.agentChatByConv)
   const [agentsDialog, setAgentsDialog] = useState<{ ws: string | null; agentId: string | null } | null>(null)
+  // ADR-0022: the per-workspace workers dialogue (worker chats + inbox).
+  const [workersDialog, setWorkersDialog] = useState<{ ws: string | null } | null>(null)
 
   /** Open a locally-owned conversation and adopt its workspace. */
   const openConversation = (c: { id: number; workspace: string | null }) => {
@@ -3457,7 +3465,7 @@ export function ConversationList({
   const isFinished = (key: string) => Boolean(finishedByConv[key])
   const isLive = (key: string, id: number) => isRunning(key, id) || isBlocked(key) || isFinished(key)
 
-  const renderRow = (c: typeof convs[number], isAgent: boolean) => (
+  const renderRow = (c: typeof convs[number], isAgent: boolean, isWorker = false) => (
     <ConversationRow
       key={c.id}
       conv={c}
@@ -3466,6 +3474,7 @@ export function ConversationList({
       blocked={isBlocked(String(c.id))}
       finished={finishedByConv[String(c.id)] ?? null}
       isAgent={isAgent}
+      isWorker={isWorker}
       menuOpen={menuOpenId === c.id}
       setMenuOpen={(open) => setMenuOpenId(open ? c.id : null)}
       onOpen={() => openConversation(c)}
@@ -3514,7 +3523,10 @@ export function ConversationList({
         // Agent chats pin above the workspace's normal chats (issue #41);
         // the 5-cap and show-more stepping apply to normal chats only.
         const wsAgents = items.filter((c) => c.chat_type === 'agent')
-        const chats = items.filter((c) => c.chat_type !== 'agent')
+        // ADR-0022: worker chats are first-class — pinned under agents,
+        // outside the 5-cap, each with its worker badge.
+        const wsWorkers = items.filter((c) => c.chat_type === 'worker')
+        const chats = items.filter((c) => c.chat_type !== 'agent' && c.chat_type !== 'worker')
         // Capped view: the 5 most recent chats, plus the open conversation
         // appended whenever it ranks older (the list never hides what you're
         // looking at); "show more" steps +5 per click, session-only.
@@ -3536,7 +3548,7 @@ export function ConversationList({
         // collapsed surfaces without user action and a live chat that goes
         // idle disappears again. Same rows, same status-slot precedence as
         // expanded rendering.
-        const liveRows = isExpanded ? [] : [...wsAgents, ...chats].filter((c) => isLive(String(c.id), c.id))
+        const liveRows = isExpanded ? [] : [...wsAgents, ...wsWorkers, ...chats].filter((c) => isLive(String(c.id), c.id))
         return (
           <div key={ws.path ?? 'default'} className="mb-3">
             {/* Workspace section: bold header, hairline top rule, chat count,
@@ -3598,6 +3610,19 @@ export function ConversationList({
               >
                 <PersonIcon />
               </button>
+              {/* Workers dialogue (ADR-0022): on-hover seat glyph listing the
+                  workspace's worker chats + its inbox. Hidden for the Default
+                  pseudo-workspace — desks clone git repos, home has none. */}
+              {ws.path !== null && (
+                <button
+                  className="rounded px-1 font-mono text-[10px] text-zinc-600 opacity-0 hover:text-zinc-200 group-hover:opacity-100 focus:opacity-100"
+                  aria-label={`Workers for ${ws.label}`}
+                  title="Workers — desk-bound worker chats and the contribution inbox for this workspace"
+                  onClick={() => setWorkersDialog({ ws: ws.path })}
+                >
+                  wkr
+                </button>
+              )}
               {ws.path !== null && (
                 <button
                   className="rounded px-1 text-[10px] text-zinc-600 opacity-0 hover:text-red-400 group-hover:opacity-100 focus:opacity-100"
@@ -3617,9 +3642,10 @@ export function ConversationList({
               )}
             </div>
             {isExpanded ? (
-              items.length > 0 ? (
+              items.length > 0 || wsWorkers.length > 0 ? (
                 <>
                   {wsAgents.map((c) => renderRow(c, true))}
+                  {wsWorkers.map((c) => renderRow(c, false, true))}
                   {visible.map((c) => renderRow(c, false))}
                   {hidden > 0 && (
                     <button
@@ -3641,7 +3667,7 @@ export function ConversationList({
             ) : liveRows.length > 0 ? (
               // Issue #310: collapsed but something is live — surface those
               // chats under the header, exactly as they render expanded.
-              liveRows.map((c) => renderRow(c, c.chat_type === 'agent'))
+              liveRows.map((c) => renderRow(c, c.chat_type === 'agent', c.chat_type === 'worker'))
             ) : null}
             </div>
           </div>
@@ -3664,6 +3690,15 @@ export function ConversationList({
             setAgentsDialog(null)
             // Renames sync the pinned chat's title server-side; re-pull so
             // the sidebar row shows it without a manual reload.
+            refresh()
+          }}
+        />
+      )}
+      {workersDialog && (
+        <WorkersDialog
+          wsPath={workersDialog.ws}
+          onClose={() => {
+            setWorkersDialog(null)
             refresh()
           }}
         />
@@ -3801,6 +3836,7 @@ export function ConversationRow({
   blocked,
   finished,
   isAgent,
+  isWorker,
   onAgentSettings,
   onToggleEnable,
   agentEnabled,
@@ -3828,6 +3864,8 @@ export function ConversationRow({
   finished: 'ok' | 'error' | null
   /** A scheduled agent's pinned chat (issue #41) — silhouette badge. */
   isAgent?: boolean
+  /** ADR-0022: a desk-bound worker chat — the 'wkr' badge. */
+  isWorker?: boolean
   /** Open the agent settings dialogue (agent chats only). */
   onAgentSettings?: () => void
   /** Pause/resume the agent's schedule (agent chats only) — issue #81: same
@@ -3920,6 +3958,15 @@ export function ConversationRow({
             title="Provider signalled low context. Run /handoff to write a handoff file, then start a new chat."
           >
             ⚠
+          </span>
+        )}
+        {isWorker && (
+          <span
+            aria-hidden="true"
+            className={`mr-1.5 shrink-0 font-mono text-[9px] uppercase tracking-wide ${active ? 'text-emerald-300' : 'text-emerald-600'}`}
+            title="Worker chat — runs at a desk, a private clone of the workspace repo (ADR-0022)"
+          >
+            wkr
           </span>
         )}
         {isAgent && (
@@ -5424,6 +5471,280 @@ export function AgentForm({
 
 const AGENT_DLG_OVERLAY =
   'fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4'
+
+/** ADR-0022: the workers dialogue for one workspace — its desk-bound worker
+ *  chats (open, delete), a spawn form, and the contribution inbox with
+ *  merge / reject / abandon. The chat-level review tools stay authoritative;
+ *  this panel is the human's view of the same queue. */
+function WorkersDialog({
+  wsPath,
+  onClose,
+}: {
+  wsPath: string | null
+  onClose: () => void
+}) {
+  const overlayPressed = useRef(false)
+  const pushToast = useAgent((s) => s.pushToast)
+  const setConversationId = useAgent((s) => s.setConversationId)
+  const loadHistory = useAgent((s) => s.loadHistory)
+  const setWorkspace = useAgent((s) => s.setWorkspace)
+  const [workers, setWorkers] = useState<Array<{ id: number; title: string; workspace: string | null; desk_dir?: string | null; updated_at: string; chat_type?: string }>>([])
+  const [inbox, setInbox] = useState<{ pending: InboxRow[]; pool: DeskPoolStatus } | null>(null)
+  const [task, setTask] = useState('')
+  const [workerName, setWorkerName] = useState('')
+  const [busy, setBusy] = useState(false)
+  // Rejection feedback travels inline: Tauri WebViews have no window.prompt,
+  // and every other dialog in this app is an in-app surface.
+  const [rejectRow, setRejectRow] = useState<number | null>(null)
+  const [rejectFeedback, setRejectFeedback] = useState('')
+
+  const refresh = useCallback(() => {
+    if (wsPath === null) return
+    listConversations().then((rows) => {
+      setWorkers(rows.filter((r) => r.chat_type === 'worker' && (r.workspace || '') === wsPath))
+    }).catch(() => {})
+    getWorkspaceInbox(wsPath).then((r) => {
+      setInbox({ pending: r.pending, pool: r.pool })
+    }).catch(() => {})
+  }, [wsPath])
+
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 4000)
+    return () => clearInterval(t)
+  }, [refresh])
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  if (wsPath === null) {
+    // The Default pseudo-workspace has no git checkout, so it has no desks.
+    return (
+      <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }>
+        <div className="w-full max-w-lg rounded-lg bg-zinc-900 p-4 shadow-2xl">
+          <h2 className="font-mono text-xs uppercase tracking-wider text-zinc-400">Workers</h2>
+          <p className="mt-2 text-xs text-zinc-500">
+            Worker chats clone the workspace repo into a desk, so they need a
+            workspace with a git checkout. The Default (Home) workspace has none.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  const spawn = async () => {
+    if (!task.trim() || busy) return
+    setBusy(true)
+    try {
+      // Spawn is an ordinary-chat capability (spawn_worker); the panel
+      // drives the same backend primitive directly so spawning works even
+      // when no conversation is open (the worker is parentless then — the
+      // human supervises through this panel).
+      const res = await spawnWorker({
+        workspace: wsPath,
+        task: task.trim(),
+        name: workerName.trim(),
+      })
+      const created = res
+      pushToast({ kind: 'success', title: 'Worker spawned', body: `Seated at desk ${created.desk ?? ''}` })
+      setTask('')
+      setWorkerName('')
+      refresh()
+    } catch (e) {
+      pushToast({ kind: 'error', title: 'Spawn failed', body: String((e as Error)?.message ?? e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const act = async (row: InboxRow, decision: 'merge' | 'reject' | 'abandon', feedback = '') => {
+    setBusy(true)
+    try {
+      const out = await reviewContribution(wsPath, row.id, decision, feedback)
+      if (out.deferred) {
+        pushToast({ kind: 'error', title: 'Deferred', body: out.detail ?? 'checkout dirty' })
+      } else {
+        pushToast({ kind: 'success', title: `Contribution ${decision}d`, body: row.branch })
+      }
+      setRejectRow(null)
+      setRejectFeedback('')
+      refresh()
+    } catch (e) {
+      pushToast({ kind: 'error', title: 'Review failed', body: String((e as Error)?.message ?? e) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openWorker = (id: number, workerWs: string | null) => {
+    // Adopt the worker's workspace before opening it: the store's selected
+    // workspace drives workspace-dependent UI and file previews, and a
+    // worker from another workspace must not render under the wrong one.
+    if (workerWs && workerWs !== wsPath) setWorkspace(workerWs)
+    setConversationId(id)
+    getMessages(id)
+      .then((rows) => loadHistory(id, rows))
+      .catch(() => {})
+    onClose()
+  }
+
+  return (
+    <div className={AGENT_DLG_OVERLAY} onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }>
+      <div className="flex max-h-[85%] w-full max-w-2xl flex-col rounded-lg bg-zinc-900 shadow-2xl">
+        <div className="flex shrink-0 items-center justify-between px-4 py-3">
+          <h2 className="font-mono text-xs uppercase tracking-wider text-zinc-400">
+            Workers — {wsBasename(wsPath)}
+          </h2>
+          <button className="rounded px-2 text-zinc-500 hover:text-zinc-200" onClick={onClose} aria-label="Close">
+            ✕
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <div className="space-y-2">
+            {workers.length === 0 && (
+              <p className="py-2 text-center text-xs text-zinc-600">
+                No worker chats in this workspace yet. A worker works in its own
+                desk — a clone outside the repo — and submits contributions for
+                review.
+              </p>
+            )}
+            {workers.map((w) => (
+              <div key={w.id} className="rounded bg-zinc-900/60 p-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[10px] uppercase text-emerald-400">worker</span>
+                  <button
+                    className="truncate font-mono text-xs text-zinc-200 hover:text-zinc-100"
+                    title="Open this worker chat"
+                    onClick={() => openWorker(w.id, w.workspace)}
+                  >
+                    {w.title}
+                  </button>
+                  <span className="flex-1 truncate font-mono text-[10px] text-zinc-600" title={w.desk_dir ?? ''}>
+                    {w.desk_dir ?? 'no desk'}
+                  </span>
+                  <button
+                    className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-red-400"
+                    title="Delete this worker chat (its desk survives for the next occupant)"
+                    onClick={async () => {
+                      await deleteConversation(w.id).catch(() => {})
+                      refresh()
+                    }}
+                  >
+                    delete
+                  </button>
+                </div>
+              </div>
+            ))}
+            <div className="rounded border border-zinc-800 p-2.5">
+              <input
+                className="mb-1.5 w-full rounded bg-zinc-800 px-2 py-1 font-mono text-[11px] text-zinc-200 placeholder-zinc-600"
+                placeholder="Worker name (optional)"
+                value={workerName}
+                onChange={(e) => setWorkerName(e.target.value)}
+              />
+              <textarea
+                className="mb-1.5 h-16 w-full resize-y rounded bg-zinc-800 px-2 py-1 font-mono text-[11px] text-zinc-200 placeholder-zinc-600"
+                placeholder="Task for the new worker — self-contained: files, what done means…"
+                value={task}
+                onChange={(e) => setTask(e.target.value)}
+              />
+              <button
+                className="rounded px-2 py-1 font-mono text-[10px] text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                disabled={busy || !task.trim()}
+                onClick={() => void spawn()}
+              >
+                spawn worker
+              </button>
+              {inbox?.pool && (
+                <span className="ml-2 font-mono text-[10px] text-zinc-600" title={inbox.pool.pool}>
+                  desks: {inbox.pool.seats.filter((s) => s.worker_conversation_id).length}/{inbox.pool.cap} seated
+                </span>
+              )}
+            </div>
+          </div>
+          <h3 className="mb-1 mt-4 font-mono text-[10px] uppercase tracking-wider text-zinc-500">
+            Inbox — pending contributions
+          </h3>
+          <div className="space-y-2">
+            {(inbox?.pending.length ?? 0) === 0 && (
+              <p className="py-2 text-center text-[11px] text-zinc-600">Inbox empty.</p>
+            )}
+            {inbox?.pending.map((row) => (
+              <div key={row.id} className="rounded bg-zinc-900/60 p-2.5">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[10px] text-amber-400">#{row.id}</span>
+                  <span className="truncate font-mono text-xs text-zinc-200">{row.branch}</span>
+                  <span className="flex-1 truncate font-mono text-[10px] text-zinc-600" title={row.desk_dir}>
+                    worker chat {row.worker_conversation_id}
+                  </span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-[10px] text-zinc-500">{row.summary}</p>
+                <div className="mt-1.5 flex gap-1.5">
+                  <button
+                    className="rounded px-1.5 py-0.5 text-[10px] text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+                    disabled={busy}
+                    title="Fetch the branch from the desk and merge it into the checkout (refuses on a dirty checkout)"
+                    onClick={() => void act(row, 'merge')}
+                  >
+                    merge
+                  </button>
+                  <button
+                    className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
+                    disabled={busy}
+                    title="Bounce back to the authoring worker with your feedback"
+                    onClick={() => {
+                      setRejectRow(row.id)
+                      setRejectFeedback('')
+                    }}
+                  >
+                    reject
+                  </button>
+                  <button
+                    className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 disabled:opacity-50"
+                    disabled={busy}
+                    title="Abandon — the row closes, the worker is free to submit again"
+                    onClick={() => void act(row, 'abandon')}
+                  >
+                    abandon
+                  </button>
+                </div>
+                {rejectRow === row.id && (
+                  <div className="mt-1.5">
+                    <input
+                      className="mb-1 w-full rounded bg-zinc-800 px-2 py-1 font-mono text-[11px] text-zinc-200 placeholder-zinc-600"
+                      placeholder="Feedback for the worker (why rejected)…"
+                      value={rejectFeedback}
+                      onChange={(e) => setRejectFeedback(e.target.value)}
+                    />
+                    <div className="flex gap-1.5">
+                      <button
+                        className="rounded px-1.5 py-0.5 text-[10px] text-zinc-200 hover:bg-zinc-800"
+                        onClick={() => void act(row, 'reject', rejectFeedback)}
+                      >
+                        send rejection
+                      </button>
+                      <button
+                        className="rounded px-1.5 py-0.5 text-[10px] text-zinc-500 hover:bg-zinc-800"
+                        onClick={() => setRejectRow(null)}
+                      >
+                        cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /** The agents dialogue for one workspace: list of that workspace's agents +
  *  "New agent", each with run-now / pause / edit / delete (delete removes the

@@ -42,6 +42,32 @@ def _tool_env() -> dict:
         _front_load_path(env, prepend_dir)
     return env
 
+
+def _worker_env() -> dict:
+    """Shell environment for worker chats (ADR-0022): no gh — not the
+    bundled one and not a system install either. Drops every PATH entry
+    that names a gh-bearing directory (bundle AND system locations that
+    carry a gh executable) and removes the gh auth env vars. A desk has no
+    origin remote, but a system gh would still find the user's existing
+    `gh auth login` credential store — so PATH-level exclusion is the
+    guard, not just token-variable removal."""
+    env = dict(os.environ)
+    parts = env.get("PATH", "").split(os.pathsep)
+    kept: list[str] = []
+    for p in parts:
+        if not p:
+            kept.append(p)
+            continue
+        probe = Path(p) / ("gh.exe" if os.name == "nt" else "gh")
+        if probe.exists():
+            continue  # a gh executable lives here — the worker must not see it
+        kept.append(p)
+    env["PATH"] = os.pathsep.join(kept)
+    for key in list(env):
+        if key.upper().startswith("GH_") or key.upper() == "GITHUB_TOKEN":
+            env.pop(key, None)
+    return env
+
 # Shared subprocess spawn conventions live in gitproc.py.
 from backend.agent.gitproc import NO_WINDOW as _NO_WINDOW, NEW_SESSION as _NEW_SESSION
 
@@ -128,6 +154,25 @@ def workspace_root(workspace: str | None) -> Path:
     if not ws or ws == ".":
         return Path.home().resolve()
     return Path(ws).resolve()
+
+
+def is_git_workspace(root) -> bool:
+    """True when `root` is a git checkout (.git dir, or a .git FILE for
+    worktrees/submodules). Desks clone git repos only (ADR-0022)."""
+    p = Path(root) / ".git"
+    return p.exists()
+
+
+def is_worker_workspace(workspace: str | None) -> bool:
+    """True when `workspace` is a desk directory (ADR-0022): a seat under
+    ~/.yaah/desks/<pool>/<n>. Worker shells get the gh-less environment;
+    everything else about the restriction is the desk root itself."""
+    from backend.agent.desks import is_desk_dir
+
+    try:
+        return is_desk_dir(workspace_root(workspace))
+    except Exception:  # noqa: BLE001 — an unresolvable path is not a desk
+        return False
 
 
 def resolve_path(workspace: str, rel_path: str, for_write: bool = False) -> Path:
@@ -622,6 +667,157 @@ async def branch_select(
     return {"ok": True, "branch": branch, "created": not exists}
 
 
+# ---- developer-world tools (ADR-0022) ---------------------------------------
+
+SPAWN_WORKER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "spawn_worker",
+        "description": (
+            "Spawn a worker chat: a restricted chat that works at a desk — "
+            "its own clone of the workspace repo, outside the checkout — and "
+            "reaches the checkout only by submitting a contribution into the "
+            "inbox, which wakes you to review and merge. Give it a self-"
+            "contained task; the text becomes its first turn. Workers cannot "
+            "spawn workers. Fails loudly at the desk-pool cap (default 4)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The worker's task: self-contained instructions "
+                    "including file paths relative to the workspace and what done "
+                    "means. It becomes the worker chat's first turn.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Short human title for the worker chat (optional).",
+                },
+            },
+            "required": ["task"],
+        },
+    },
+}
+
+SUBMIT_CONTRIBUTION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "submit_contribution",
+        "description": (
+            "Hand your work over from your desk (worker chats only): commit "
+            "it on a branch in the desk, then submit a contribution (summary "
+            "+ branch + base commit) into the workspace's inbox. The "
+            "supervising chat is woken to review and merge. Blocked on a "
+            "dirty desk — commit (or clean) first. One pending contribution "
+            "at a time; it closes only on merge or abandon."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "What the contribution does and why; the "
+                    "supervisor reads this instead of re-deriving the diff.",
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "The desk branch holding committed work.",
+                },
+                "base_commit": {
+                    "type": "string",
+                    "description": "The commit you branched from (optional; "
+                    "the merge-base with the workspace state is derived when "
+                    "omitted).",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short human title (optional).",
+                },
+            },
+            "required": ["summary", "branch"],
+        },
+    },
+}
+
+MESSAGE_WORKER_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "message_worker",
+        "description": (
+            "Send a message to one of your worker chats (steer mid-task, "
+            "reply to a bounce, or just inform). The worker is woken: the "
+            "message starts its next turn, or queues behind an active one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "worker_conversation_id": {
+                    "type": "integer",
+                    "description": "The worker chat's numeric id (from "
+                    "spawn_worker's result or the workers list).",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The message to deliver.",
+                },
+            },
+            "required": ["worker_conversation_id", "text"],
+        },
+    },
+}
+
+REVIEW_CONTRIBUTION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "review_contribution",
+        "description": (
+            "Act on one pending inbox contribution (supervisor): merge it "
+            "into the checkout (fetch from the desk, merge; you own conflict "
+            "resolution; a dirty checkout defers — user WIP is never "
+            "integrated through), reject it (bounces to the authoring worker "
+            "with your feedback), or abandon it. The row closes only on "
+            "merge or explicit abandon."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contribution_id": {
+                    "type": "integer",
+                    "description": "The inbox row's id (from the inbox list "
+                    "or the wake prompt).",
+                },
+                "decision": {
+                    "type": "string",
+                    "description": "One of: merge, reject, abandon.",
+                    "enum": ["merge", "reject", "abandon"],
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": "Review feedback for a rejection (bounces "
+                    "to the authoring worker).",
+                },
+            },
+            "required": ["contribution_id", "decision"],
+        },
+    },
+}
+
+WORKER_WORLD_TOOLS_SCHEMA = [
+    SPAWN_WORKER_SCHEMA,
+    SUBMIT_CONTRIBUTION_SCHEMA,
+    MESSAGE_WORKER_SCHEMA,
+    REVIEW_CONTRIBUTION_SCHEMA,
+]
+
+# Schemas a worker chat never gets (ADR-0022: workers cannot spawn workers;
+# the supervisor-side worker management tools belong to ordinary chats).
+WORKER_EXCLUDED_TOOLS = {
+    "spawn_agent",
+    "spawn_worker",
+}
+
+
 async def get_help(workspace: str = "", tool_name: str = "") -> dict:
     name = (tool_name or "").strip()
     schemas = {s["function"]["name"]: s for s in get_schemas()}
@@ -670,6 +866,17 @@ _MEMORY_TOOL_NAMES = set(MEMORY_TOOLS)
 # the model never passes it, and the executor signatures take it
 # optionally so direct calls (tests, other harness code) still work.
 CONTEXT_TOOLS = ("search_conversation_history", "spawn_detached")
+
+# ADR-0022: the developer-world tools resolve the calling conversation at
+# the dispatch funnel, exactly like CONTEXT_TOOLS — the executor's
+# identity checks (ordinary chat spawns, owning supervisor messages, the
+# worker itself submits) read the conversation row, never model args.
+WORKER_WORLD_TOOLS = (
+    "spawn_worker",
+    "submit_contribution",
+    "message_worker",
+    "review_contribution",
+)
 
 # #439: image-generation executors that auto-match style LoRAs. The
 # harness injects the user's typed words for the current turn into these
@@ -1335,7 +1542,8 @@ async def run_bash(
     on_chunk, when given, receives output incrementally while it runs."""
 
     async def spawn(cmd: str):
-        return await _create_bash_process(cmd, workspace_root(workspace), _tool_env())
+        env = _worker_env() if is_worker_workspace(workspace) else _tool_env()
+        return await _create_bash_process(cmd, workspace_root(workspace), env)
 
     return await _run_shell(spawn, workspace, command, timeout_seconds, on_chunk)
 
@@ -1345,13 +1553,14 @@ async def run_powershell(
 ) -> dict:
     """Run a Windows PowerShell command in the workspace; same structured
     result shape as run_bash. on_chunk receives output incrementally."""
+    env = _worker_env() if is_worker_workspace(workspace) else _tool_env()
 
     async def spawn(cmd: str):
         return await asyncio.create_subprocess_exec(
             "powershell.exe", "-NoProfile", "-NonInteractive",
             "-ExecutionPolicy", "Bypass", "-Command", cmd,
             cwd=workspace_root(workspace),
-            env=_tool_env(),
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             **_NO_WINDOW, **_NEW_SESSION,
@@ -1507,6 +1716,22 @@ async def search_conversation_history(
     from backend.db.database import search_conversations_in_workspace
     from backend.db.database import get_related_workspaces
     from backend.agent.search_semantic import search_with_semantic
+
+    # Worker turns re-root the WORKSPACE at the desk, but worker ROWS store
+    # the project workspace: a workspace-reach search keyed on the desk path
+    # matches no conversation rows and silently returns nothing. Resolve the
+    # real project workspace once, here, and search from there.
+    from backend.db.database import get_conversation
+
+    if workspace_reach == "workspace" and conversation_id is not None:
+        try:
+            conv = await get_conversation(int(conversation_id))
+        except Exception:  # noqa: BLE001 — search must keep working
+            conv = None
+        if conv is not None and (conv.get("chat_type") or "chat") == "worker":
+            project_ws = (conv.get("workspace") or "").strip()
+            if project_ws and not project_ws.startswith("remote:"):
+                workspace = project_ws
 
     if workspace_reach == "workspace":
         async def ws_keyword_fn(q: str, n: int) -> dict:
@@ -3544,6 +3769,14 @@ EXECUTORS = {
     "memory_search": _memory_executor("search"),
     "memory_delete": _memory_executor("delete"),
 }
+from backend.agent import desks as desks_mod
+EXECUTORS.update({
+    "spawn_worker": desks_mod.spawn_worker_tool,
+    "submit_contribution": desks_mod.submit_contribution_tool,
+    "message_worker": desks_mod.message_worker_tool,
+    "review_contribution": desks_mod.review_contribution_tool,
+})
+TOOLS_SCHEMA += WORKER_WORLD_TOOLS_SCHEMA
 
 # Issue #770: spawn_detached / stop_process. The spawn flags (CREATE_NO_WINDOW
 # etc.) are Windows-only and the schema is offered only on Windows by
@@ -3721,6 +3954,12 @@ async def execute_tool(
         # #303: one injection point for chat-scoped tools — the model can't
         # pass its own conversation id, and every dispatch path (direct,
         # gate-approved re-exec, sub-agent) funnels through execute_tool.
+        arguments = {**arguments, "conversation_id": conversation_id}
+    if name in WORKER_WORLD_TOOLS:
+        # ADR-0022: the developer-world tools resolve the calling chat the
+        # same way (#303 shape) — identity checks (only an ordinary chat
+        # spawns; only the owning supervisor messages; only a worker
+        # submits) read the conversation row, never model-supplied args.
         arguments = {**arguments, "conversation_id": conversation_id}
     if name in _MEMORY_TOOL_NAMES:
         # #346: one injection point for the canonical memory key — the

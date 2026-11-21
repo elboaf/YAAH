@@ -287,6 +287,20 @@ async def remote_auth_guard(request, call_next):
                          "message": "browser control is host-owner-only"}},
             status_code=409,
         )
+    # Developer world (ADR-0022) is host-owner-only in v1: spawning a
+    # worker, desk seating, inbox review, and cross-chat wakes all resolve
+    # local paths on this machine. A paired device drives the host through
+    # /api/remote/... tools, never through these routes.
+    if remote_peer and (
+        parts[:2] == ["api", "workers"]
+        or (len(parts) >= 3 and parts[:2] == ["api", "workspaces"]
+            and parts[2] == "inbox")
+    ):
+        return JSONResponse(
+            {"detail": {"code": "remote_worker_world_not_enabled",
+                         "message": "worker chats and desks are host-owner-only"}},
+            status_code=409,
+        )
     return await call_next(request)
 
 
@@ -307,6 +321,7 @@ from backend.db.database import (
     get_conversation,
     get_messages,
     list_conversations,
+    list_worker_children,
     list_workspaces,
     move_conversation,
     touch_workspace,
@@ -360,6 +375,13 @@ class ConversationMove(BaseModel):
     # from the conversation row, so THIS is what makes the move real —
     # the sidebar grouping alone would only relabel it (issue #8).
     workspace: str | None = None
+
+
+class WakeRequest(BaseModel):
+    message: str
+    # Reserved for a future worker-structured payload; the wake primitive
+    # wraps the message with its source tag today.
+    source: str = "api"
 
 
 class NewMessage(BaseModel):
@@ -992,6 +1014,16 @@ async def api_move_conversation(conversation_id: int, body: ConversationMove):
             status_code=409,
             detail="a run is active in this chat — stop it before moving",
         )
+    # ADR-0022: a worker chat's desk is a clone of ITS workspace repo; the
+    # desk_dir column pins that lineage. Moving a worker to another
+    # workspace (or to Default) would leave its desk pointing at the old
+    # repo — refuse rather than orphan it.
+    if (conv.get("chat_type") or "chat") == "worker":
+        raise HTTPException(
+            status_code=409,
+            detail="worker chats cannot move — a worker is bound to its "
+            "workspace's desk; delete the worker and spawn a new one there",
+        )
     if queue_items(conversation_id):
         raise HTTPException(
             status_code=409,
@@ -1012,8 +1044,127 @@ async def api_move_conversation(conversation_id: int, body: ConversationMove):
     }
 
 
+@app.get("/api/conversations/{conversation_id}/workers")
+async def api_list_workers(conversation_id: int):
+    """The worker chats parented by an ordinary chat (ADR-0022)."""
+    children = await list_worker_children(conversation_id)
+    return [
+        {
+            "id": c["id"],
+            "title": c["title"],
+            "chat_type": c.get("chat_type") or "chat",
+            "workspace": c.get("workspace"),
+            "desk_dir": c.get("desk_dir"),
+            "created_at": c.get("created_at"),
+            "updated_at": c.get("updated_at"),
+        }
+        for c in children
+    ]
+
+
+@app.get("/api/workspaces/inbox")
+async def api_workspace_inbox(workspace: str | None = None):
+    """The workspace's pending inbox rows (ADR-0022). Empty workspace
+    string = the Default pseudo-workspace."""
+    from backend.agent import desks as desks_mod
+
+    ws = (workspace or "").strip()
+    return {
+        "workspace": ws,
+        "pool": desks_mod.pool_status(ws),
+        "pending": desks_mod.list_inbox(ws, include_closed=False),
+        "recent": desks_mod.list_inbox(ws, include_closed=True)[-20:],
+    }
+
+
+class WorkerSpawnRequest(BaseModel):
+    workspace: str
+    task: str
+    name: str = ""
+    # The spawning ordinary chat, when the UI drives the spawn from one.
+    # null = a parentless worker (the human supervises via this panel; its
+    # submits sit in the inbox without waking a chat).
+    parent_conversation_id: int | None = None
+
+
+# Declared BEFORE the /{conversation_id}/... routes: "workers" must never
+# be parsed as a conversation id.
+@app.post("/api/workers/spawn")
+async def api_spawn_worker(body: WorkerSpawnRequest):
+    """UI on-ramp for the developer world (ADR-0022): seat a new worker
+    chat at a desk from the workspace's pool and fire its first turn."""
+    from backend.agent import desks as desks_mod
+
+    result = await desks_mod.spawn_worker_tool(
+        workspace=body.workspace,
+        task=body.task,
+        name=body.name,
+        conversation_id=body.parent_conversation_id,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@app.post("/api/conversations/{conversation_id}/wake")
+async def api_wake_conversation(conversation_id: int, body: WakeRequest):
+    """Frontend wake button (ADR-0022): start or queue a turn on another
+    chat's behalf and report the delivery outcome."""
+    delivery = await wake_conversation(
+        conversation_id, body.message, source="ui"
+    )
+    if delivery == "gone":
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"delivery": delivery}
+
+
+class InboxReviewRequest(BaseModel):
+    decision: str
+    feedback: str = ""
+
+
+@app.post("/api/workspaces/inbox/{contribution_id}/review")
+async def api_inbox_review(contribution_id: int, body: InboxReviewRequest, workspace: str | None = None):
+    """Human-side review of one inbox row (ADR-0022): merge / reject /
+    abandon, same executor the supervising chat's tool uses."""
+    from backend.agent import desks as desks_mod
+
+    ws = (workspace or "").strip()
+    if not ws:
+        raise HTTPException(status_code=400, detail="workspace query parameter is required")
+    result = await desks_mod.review_contribution_tool(
+        workspace=ws,
+        contribution_id=contribution_id,
+        decision=body.decision,
+        feedback=body.feedback,
+        conversation_id=None,
+    )
+    if result.get("error") and not result.get("deferred"):
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
 @app.delete("/api/conversations/{conversation_id}")
 async def api_delete_conversation(conversation_id: int):
+    # ADR-0022: deleting a worker chat releases its desk seat (the desk
+    # directory itself outlives the chat — the next occupant inherits it)
+    # and abandons any pending contribution so the inbox never dangles.
+    from backend.agent import desks as desks_mod
+
+    conv = await get_conversation(conversation_id)
+    if conv is not None and (conv.get("chat_type") or "chat") == "worker":
+        conv_ws = (conv.get("workspace") or "").strip()
+        if conv_ws and not conv_ws.startswith("remote:"):
+            row = desks_mod.pending_contribution(conv_ws, conversation_id)
+            if row is not None:
+                desks_mod.update_contribution(
+                    conv_ws, row["id"], status="abandoned",
+                    review="worker chat deleted",
+                )
+            # release_desk is a coroutine: without the await its body never
+            # runs, the stale marker stays, the seat counts against the
+            # pool cap forever, and no cleanup path clears it.
+            await desks_mod.release_desk(conv_ws, conversation_id)
     try:
         ok = await delete_conversation(conversation_id)
     except RemoteProtocolError as error:
@@ -1509,6 +1660,115 @@ def _resolve_turn_scope(
     return "", None, ""
 
 
+# ---- developer world: cross-chat wake (ADR-0022) -----------------------------
+
+_WAKE_RUN_TASKS: set = set()
+
+
+async def wake_conversation(conversation_id: int, prompt: str, source: str = "") -> str:
+    """Start (or queue behind) one turn on ANOTHER conversation — the
+    developer-world wake primitive (ADR-0022). Submit wakes the supervising
+    chat; a review bounce or message_worker wakes the worker; a spawn fires
+    the worker's first turn. Same shape as the wake bridge's _fire_wake
+    (backend/agent/wake.py): idle targets get run_agent in a held-ref
+    background task, busy targets get the prompt via the queue, and the
+    idle->busy claim race is recovered from run_agent's kind=busy refusal.
+    Returns 'started' | 'queued' | 'gone'."""
+    from backend.agent import loop as loop_mod
+
+    if loop_mod.agent_is_running(conversation_id):
+        loop_mod.enqueue_message(conversation_id, prompt)
+        return "queued"
+    conv = await get_conversation(conversation_id)
+    if conv is None:
+        return "gone"
+    agent = None
+    if (conv.get("chat_type") or "chat") == "agent":
+        agent = await get_agent_for_conversation(conversation_id)
+    model, effort, subagent_scope = _resolve_turn_scope(conv, agent)
+
+    async def _drain() -> None:
+        """Consume one wake-fired run's stream. The loop persists the
+        transcript itself; the stream has no UI — except the kind=busy
+        refusal, which is the idle->busy race signal and re-routes the
+        prompt into the running turn's queue, and the queued_autosend
+        hand-off, whose items would otherwise be dropped (nothing is
+        draining a wake-fired turn's queue once the run completes — the
+        browser's follow-up-turn path does not run here)."""
+        try:
+            async for line in run_agent(
+                conversation_id,
+                prompt,
+                conv.get("workspace") or "",
+                model_override=model,
+                effort_override=effort,
+                subagent_scope=subagent_scope,
+            ):
+                if '"kind": "busy"' in line or '"kind":"busy"' in line:
+                    loop_mod.enqueue_message(conversation_id, prompt)
+                    return
+                if '"type": "queued_autosend"' in line or '"type":"queued_autosend"' in line:
+                    # The loop already re-persists any drained items it
+                    # hands off here; re-enqueue them and fire a follow-up
+                    # wake so they actually run. The follow-up wake lands
+                    # on an idle conversation now (this run completed), so
+                    # it starts a fresh turn and can never self-deadlock.
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    items = event.get("items") or []
+                    if not items:
+                        continue
+                    for item in items:
+                        loop_mod.enqueue_message(
+                            conversation_id,
+                            item.get("text") or "",
+                            skills=item.get("skills") or [],
+                            images=item.get("images") or [],
+                            attachments=item.get("attachments") or [],
+                        )
+                    asyncio.create_task(
+                        wake_conversation(
+                            conversation_id,
+                            WAKE_RESUME_PROMPT,
+                            source="wake-resume",
+                        )
+                    )
+                    return
+        except Exception:  # noqa: BLE001 — a failed wake must not kill its caller
+            log.exception("wake-fired run on conversation %s failed (%s)", conversation_id, source)
+
+    task = asyncio.create_task(_drain())
+    _WAKE_RUN_TASKS.add(task)
+    task.add_done_callback(_WAKE_RUN_TASKS.discard)
+    return "started"
+
+
+# What a follow-up wake says when it restarts a turn to run the queued
+# messages the previous turn handed off (queued_autosend). The enqueued
+# texts ride the queue; this prompt just gets the turn going.
+WAKE_RESUME_PROMPT = (
+    "[wake] Your previous turn queued follow-up messages that never ran. "
+    "They are back in your queue — continue where the turn left off."
+)
+
+
+def _worker_first_prompt(task: str) -> str:
+    """A freshly spawned worker's first turn (ADR-0022): the task plus the
+    contribution-path framing. The desk fragment in the system prompt
+    carries the standing rules; this carries the assignment."""
+    return (
+        "[developer world] You were spawned as a worker chat at a desk — a "
+        "private clone of the workspace repo outside the checkout. Your task:\n\n"
+        f"{task}\n\n"
+        "Everything you do already happens inside the desk. Commit your work "
+        "on a branch, keep the desk clean, and call submit_contribution when "
+        "it is ready for review. Reply-ready: the supervising chat may send "
+        "you messages mid-task."
+    )
+
+
 class ProviderEntry(BaseModel):
     api_base: str | None = None
     api_key: str | None = None
@@ -1588,6 +1848,11 @@ async def api_agent_turn(conversation_id: int, body: AgentTurn, request: Request
     # a directory it is no longer filed under.
     conv = await get_conversation(conversation_id)
     turn_workspace = (conv or {}).get("workspace") or ""
+    # ADR-0022: a worker chat's turns stream like any chat's, but user
+    # sends are NOT the supervising channel — ordinary chats reach workers
+    # through message_worker, and user messages here are treated as
+    # supervisor words by convention only. No extra guard beyond the
+    # running check above; the desk re-root happens inside run_agent.
     # Per-chat model + effort (#51/#76): resolve what this turn runs on.
     agent = None
     if conv is not None and (conv.get("chat_type") or "chat") == "agent":
