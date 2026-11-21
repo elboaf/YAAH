@@ -323,6 +323,18 @@ def test_create_junctions_reports_bundled_skill_dir_as_occupied(monkeypatch, man
     # link. router/browser resolve to real packs and become junctions.
     (skills / "research").mkdir()
 
+    # _create_junction shells out to PowerShell (a junction is a
+    # Windows-only object), so faking the leaf lets this pure-path-logic
+    # test run on Linux CI without a real junction -- matching the
+    # test_symlink_slot_repair_via_seam pattern below. The report shape is
+    # what we assert; the junction leaf itself is not under test here.
+    created = []
+    monkeypatch.setattr(
+        inst,
+        "_create_junction",
+        lambda target, link: created.append((str(link), target)),
+    )
+
     result = inst._create_junctions()
 
     # The bundled-skill slot is NOT a junction target...
