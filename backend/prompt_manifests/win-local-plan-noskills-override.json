@@ -143,6 +143,26 @@
       "sha256": "0f81510e232be7ffe7df34c056590d581161a594d23dc49d2576a5520a77e056"
     },
     {
+      "name": "spawn_worker",
+      "bytes": 831,
+      "sha256": "8fbf15182fc3a16ac5aee8dd9a26b54c0c8cd618433337a8e1c139e66266f79b"
+    },
+    {
+      "name": "submit_contribution",
+      "bytes": 994,
+      "sha256": "89d45b8db114763b456caeaab66190c035980b0109f6ffbd2e0ada740c0836fc"
+    },
+    {
+      "name": "message_worker",
+      "bytes": 573,
+      "sha256": "dd00262de7e47101fe375b827f7034f9b6115fcaab46b9cfd96fef08cf3e4044"
+    },
+    {
+      "name": "review_contribution",
+      "bytes": 872,
+      "sha256": "a77c565ec89b066b5bf6f263bf2c70fe6ebf73d2e2db69f91982aa95920711d9"
+    },
+    {
       "name": "sandbox_test",
       "bytes": 657,
       "sha256": "8bfd3aac420d263df924e7aa066427d5d7e0bc2801868191467b98f4dba1b142"
