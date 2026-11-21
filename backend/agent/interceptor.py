@@ -166,6 +166,11 @@ def _run_cli(argv: list[str], timeout: float = 15.0) -> subprocess.CompletedProc
             text=True,
             timeout=timeout,
             check=False,
+            # The CLI is a console-subsystem binary and YAAH's packaged app
+            # is windowed, so without this every status call pops a console
+            # window on the desktop -- and status is polled every 3s while
+            # the extension panel is open (#777). POSIX: no-op (0).
+            creationflags=gitproc.CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return subprocess.CompletedProcess(argv, 126, stdout="", stderr="spawn failed")

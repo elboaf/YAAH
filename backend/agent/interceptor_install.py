@@ -43,6 +43,7 @@ import subprocess
 from pathlib import Path
 
 from backend.agent import interceptor
+from backend.agent.gitproc import CREATE_NO_WINDOW as _CREATE_NO_WINDOW
 
 
 # --- seams to the world ---------------------------------------------------
@@ -99,6 +100,9 @@ def _download_asset(url: str) -> Path:
         text=True,
         timeout=600,
         check=False,
+        # curl.exe is a console binary spawned from a windowed app: without
+        # the flag a console window flashes during the download (#777).
+        creationflags=_CREATE_NO_WINDOW,
     )
     if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
         if tmp.exists():
@@ -135,6 +139,9 @@ def _run_installer(exe: Path, log: Path) -> subprocess.CompletedProcess:
         text=True,
         timeout=600,
         check=False,
+        # The Inno Setup installer is a console-flashed child of a windowed
+        # app; CREATE_NO_WINDOW suppresses the flash (#777). POSIX: no-op (0).
+        creationflags=_CREATE_NO_WINDOW,
     )
 
 
@@ -254,6 +261,9 @@ def _create_junction(target_dir: str, link_path: Path) -> None:
         text=True,
         timeout=60,
         check=False,
+        # powershell.exe is a console child of a windowed app; suppress the
+        # flash at each of the three junction creations (#777). POSIX: no-op.
+        creationflags=_CREATE_NO_WINDOW,
     )
     if proc.returncode != 0:
         raise RuntimeError(
