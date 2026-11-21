@@ -3917,9 +3917,15 @@ async def execute_tool(
         return await host.exec_tool(name, arguments, workspace=workspace)
     if namespaced is None and name in remote_mod.REMOTE_TOOLS:
         # Legacy connected mode remains supported during the API/UI migration.
-        host = remote_mod.get_remote()
-        if host is not None:
-            return await host.exec_tool(name, arguments, workspace=workspace)
+        # Desk workspaces are always local unnamespaced paths; a legacy remote
+        # session must not intercept them or the worker operates on the wrong
+        # host. (#681 developer world)
+        if is_worker_workspace(workspace):
+            pass  # desk runs local; skip legacy remote forwarding
+        else:
+            host = remote_mod.get_remote()
+            if host is not None:
+                return await host.exec_tool(name, arguments, workspace=workspace)
     # MCP server tools route by name prefix, before the static executor map.
     if name.startswith("mcp_"):
         from backend.agent import mcp_client
