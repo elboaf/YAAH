@@ -73,7 +73,7 @@ def libpython_candidates():
         for key in ("LDLIBRARY", "LIBDIR"):
             val = sysconfig.get_config_var(key)
             if val and os.path.isdir(val):
-                out.extend(sorted(glob.glob(os.path.join(val, "libpython3*.so*"))))
+                out.extend(sorted(glob.glob(os.path.join(val, "libpython3.[0-9]*.so.[0-9]*"))))
     return sorted(set(os.path.realpath(p) for p in out))
 
 

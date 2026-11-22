@@ -245,6 +245,19 @@ def test_baseline_missing_libpython_fails(monkeypatch):
         baseline.main()
 
 
+def test_libpython_discovery_excludes_stub_and_bare_soname(tmp_path):
+    # rc.21 release run (45072370818): custody failed on libpython3.so -
+    # PBS's unversioned ABI stub, whose bytes are NOT the pinned artifact's.
+    # Discovery must return only the versioned real library.
+    (tmp_path / "libpython3.12.so.1.0").write_bytes(b"real")
+    (tmp_path / "libpython3.so").write_bytes(b"stub")
+    (tmp_path / "libpython3.12.so").write_bytes(b"soname symlink")
+    import os
+
+    found = [os.path.basename(p) for p in cal.libpython_candidates_for(str(tmp_path))]
+    assert found == ["libpython3.12.so.1.0"]
+
+
 def test_baseline_counts_whole_words_only(monkeypatch):
     dis = b"  vinserti128suffix 0\n  vinserti128 ymm0, ymm1, ymm2, 0x0\n"
     assert baseline.count_mnemonics(dis, "vinserti128") == 1
