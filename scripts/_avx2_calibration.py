@@ -61,12 +61,17 @@ def libpython_candidates_for(prefix: str):
         prefix,
         os.path.join(prefix, "lib"),
     ]
-    # de-dup, keep order
+    # Only the VERSIONED real library (libpython3.12.so.1.0) is the
+    # artifact. PBS also ships libpython3.so (an unversioned ABI stub,
+    # different bytes) and a bare libpython3.12.so symlink; the rc.21
+    # release run failed custody on the stub's hash because the old
+    # libpython3*.so* glob matched it.
+    pattern = "libpython3.[0-9]*.so.[0-9]*"
     seen = set()
     out = []
     for base in bases:
         if base in seen:
             continue
         seen.add(base)
-        out.extend(sorted(glob.glob(os.path.join(base, "libpython3*.so*"))))
+        out.extend(sorted(glob.glob(os.path.join(base, pattern))))
     return sorted(set(out))
