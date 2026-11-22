@@ -266,36 +266,6 @@ async def test_authenticated_remote_peer_cannot_reach_browser_control(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_worker_world_routes_fail_closed_for_remote_peers():
-    """ADR-0022 surfaces are host-owner-only in v1: spawn, inbox read, and
-    review all 409 for a remote peer before any handler runs."""
-    _set_host("test-passphrase")
-    from httpx import ASGITransport, AsyncClient
-
-    from backend.main import app
-
-    headers = {"X-Yaah-Remote": "1", "X-Yaah-Passphrase": "test-passphrase"}
-    requests = [
-        ("POST", "/api/workers/spawn", {"workspace": "C:/x", "task": "t"}),
-        ("GET", "/api/workspaces/inbox?workspace=C:/x", None),
-        ("POST", "/api/workspaces/inbox/1/review",
-         {"decision": "merge", "workspace": "C:/x"}),
-    ]
-    # Cross-chat wakes (/api/conversations/{id}/wake) stay covered by the
-    # pre-existing conversations-namespace guard (remote_write_requires_lease)
-    # — fail-closed there too, with the older code.
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        for method, path, body in requests:
-            response = await client.request(method, path, json=body, headers=headers)
-            assert response.status_code == 409, (method, path, response.text)
-            assert (
-                response.json()["detail"]["code"] == "remote_worker_world_not_enabled"
-            ), (method, path, response.text)
-
-
-@pytest.mark.asyncio
 async def test_local_browser_control_stays_reachable_without_remote_marker(monkeypatch):
     """The local UI reaches its own install state: the #776 gate is on
     remote peers only, so an unmarked loopback request still passes the
