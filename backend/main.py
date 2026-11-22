@@ -1181,6 +1181,9 @@ async def api_delete_conversation(conversation_id: int):
                     conv_ws, row["id"], status="abandoned",
                     review="worker chat deleted",
                 )
+        except Exception:  # noqa: BLE001 — abandoned state failed; desk release is retryable
+            log.exception("failed to mark pending contribution as abandoned")
+        try:
             await desks_mod.release_desk(conv_ws, conversation_id)
         except Exception:  # noqa: BLE001 — don't fail the delete on seat cleanup
             log.exception("failed to release desk seat after worker deletion")

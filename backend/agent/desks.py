@@ -247,8 +247,20 @@ async def _run_git(args: list[str], cwd: Path | None = None) -> tuple[int, str]:
             ),
             timeout=5,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
-        return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+            return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
+        except asyncio.TimeoutError:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except Exception:  # noqa: BLE001 — already timed out; force kill
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:  # noqa: BLE001 — reap best effort
+                    pass
+            raise
     except (asyncio.TimeoutError, OSError) as e:
         return 124 if isinstance(e, asyncio.TimeoutError) else 1, str(e)
 
@@ -697,8 +709,18 @@ async def spawn_worker_tool(
     except Exception:
         await abandon_reservation(conv_ws, seat)
         raise
-    # Convert the reservation to the real occupant.
-    await _write_marker(Path(seat["dir"]), worker_id)
+    # Convert the reservation to the real occupant. Verify we still own it;
+    # a stale reservation taken over by another spawn has already replaced
+    # the marker, and we must not overwrite that.
+    marker_data = _read_marker(Path(seat["dir"]))
+    if marker_data.get("reserved_by") != seat["reservation"]:
+        await delete_conversation(worker_id)  # compensate: we don't own the seat
+        raise RuntimeError(f"reservation {seat['reservation']} lost before seat conversion")
+    try:
+        await _write_marker(Path(seat["dir"]), worker_id)
+    except Exception:
+        await delete_conversation(worker_id)  # compensate: write failed
+        raise
     fired = None
     if task and task.strip():
         from backend.main import _worker_first_prompt
