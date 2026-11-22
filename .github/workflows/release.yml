@@ -278,10 +278,13 @@ jobs:
       # cookie + TOC and zlib first. `python` here is the baseline
       # interpreter provisioned above. Windows has no gate -
       # setup-python's local build matches the Windows target CPUs.
+      - name: AVX2 gate (bundled libpython is the pinned baseline)
+        if: matrix.os == 'Linux'
+        shell: bash
         run: |
           set -euo pipefail
           python scripts/check_avx2_gate.py dist/backend dist/yaah-server
-          echo "AVX2 gate passed: no AVX2-only instructions in bundled libpython"
+          echo "AVX2 gate passed: libpython custody + spread envelope verified"
 
       - name: Build (verbose, logged)
         if: matrix.artifact == 'desktop'
