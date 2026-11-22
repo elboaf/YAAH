@@ -18,6 +18,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # #778: must stay IDENTICAL to the block in release.yml — CI's backend
+  # job runs on the same Ubuntu 26.04 self-hosted pool, so its tests run
+  # on the same pinned BASELINE (non-x86-64-v3) CPython the Linux sidecar
+  # freeze uses. See release.yml for the full rationale.
+  PBS_RELEASE_TAG: "20261110"
+  PBS_VERSION: "3.12.16"
+  PBS_ASSET: "cpython-3.12.16+20261110-x86_64-unknown-linux-gnu-install_only.tar.gz"
+  PBS_SHA256: "c2f87d4b4e8db3abddb0f116c6ccfc503d0cbdbb9ee8faacddad1b679ec12e99"
+
 jobs:
   frontend:
     name: Frontend build
@@ -63,7 +73,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # #778: the backend suite runs on the same Ubuntu 26.04 pool the
+      # Linux sidecar freeze uses — run it on the same pinned BASELINE
+      # (non-x86-64-v3) CPython (see release.yml).
+      - name: Provision baseline CPython (matches Linux sidecar freeze)
+        if: matrix.shard == 0
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE_TAG}/${PBS_ASSET}"
+          echo "downloading $url"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/pbs.tar.gz" "$url"
+          echo "${PBS_SHA256}  ${RUNNER_TEMP}/pbs.tar.gz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/baseline-python"
+          tar -xzf "$RUNNER_TEMP/pbs.tar.gz" -C "$RUNNER_TEMP/baseline-python"
+          PYBIN="$RUNNER_TEMP/baseline-python/python/bin"
+          "$PYBIN/python" -VV
+          echo "$PYBIN" >> "$GITHUB_PATH"
+
       - uses: actions/setup-python@v5
+        if: matrix.shard != 0
         with:
           python-version: "3.12"
           cache: pip
