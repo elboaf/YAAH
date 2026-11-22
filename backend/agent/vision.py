@@ -112,8 +112,19 @@ async def _get_json(
 
 
 async def _rule_llamacpp_props(api_base: str, model: str, api_key: str) -> Verdict:
-    """llama.cpp (recent builds): GET /props -> modalities.vision."""
-    props = await _get_json(api_base, "/props", api_key)
+    """llama.cpp (recent builds): GET /props -> modalities.vision.
+
+    Some server deployments put /props at the server root rather than
+    under /v1 (ninfer does; llama.cpp itself serves it at root). Re-base
+    to the root when the api_base ends in /v1 - the same trick the Ollama
+    rule uses - so the props endpoint is found regardless of the trailing
+    suffix the provider config carries.
+    """
+    root = api_base.rstrip("/")
+    for suffix in ("/v1", ""):
+        if root.endswith(suffix) and suffix:
+            root = root[:-len(suffix)]
+    props = await _get_json(root, "/props", api_key)
     if not isinstance(props, dict):
         return None
     modalities = props.get("modalities")
@@ -127,24 +138,62 @@ async def _rule_llamacpp_props(api_base: str, model: str, api_key: str) -> Verdi
 
 
 def _args_have_mmproj(args: list) -> Optional[bool]:
-    """True/False when the launch argv names (or omits) --mmproj."""
+    """Check launch argv for vision projector indicators.
+
+    Returns True if a projector flag is found. Returns None if no
+    projector flag is found - the caller decides whether that means
+    False (llama.cpp: absence of --mmproj is definitive) or passes
+    through as unknown (other server types where vision may be baked
+    into the artifact).
+    """
     if not isinstance(args, list):
         return None
-    return "--mmproj" in args
+    # llama.cpp uses --mmproj; ninfer uses --vision; some use --vision-projector
+    flags = ("--mmproj", "--vision", "--vision-projector")
+    for f in flags:
+        if f in args:
+            return True
+    return None
 
 
 async def _rule_llamacpp_models_args(api_base: str, model: str, api_key: str) -> Verdict:
-    """llama.cpp router builds: /v1/models entries embed the instance's
-    launch argv under status.args - --mmproj present/absent is definitive
-    per model id."""
+    """Server /v1/models entries embed the instance's launch argv under
+    status.args - projector flags present/absent are definitive per model id.
+
+    For llama.cpp: absence of --mmproj is a definitive False.
+    For other server types (e.g. ninfer): presence of --vision or similar
+    is True; absence is None (unknown), not False.
+    """
     data = await _get_json(api_base, "/v1/models", api_key)
     if not isinstance(data, dict):
         return None
     for m in data.get("data") or []:
         if not isinstance(m, dict) or str(m.get("id") or "") != model:
             continue
-        return _args_have_mmproj((m.get("status") or {}).get("args"))
+        has_proj = _args_have_mmproj((m.get("status") or {}).get("args"))
+        if has_proj is True:
+            return True
+        # Absence of projector flag: definitive False only for llama.cpp.
+        # Other server types may bake vision into the artifact and use
+        # no projector flag at all - abstain (return None = unknown).
+        if _looks_like_llamacpp_argv((m.get("status") or {}).get("args")):
+            return False
     return None
+
+
+def _looks_like_llamacpp_argv(args: list) -> bool:
+    """Heuristic: argv contains llama.cpp-specific flags."""
+    if not isinstance(args, list):
+        return False
+    # The executable name or llama.cpp-specific flags
+    llama_flags = ("server", "-m", "--model", "-n", "--n-predict", "-t", "--threads",
+                  "-c", "--ctx-size", "-ngl", "--n-gpu-layers")
+    for arg in args:
+        if arg == "llama-server":
+            return True
+        if arg in llama_flags:
+            return True
+    return False
 
 
 async def _rule_openrouter_catalog(api_base: str, model: str, api_key: str) -> Verdict:
@@ -307,3 +356,11 @@ async def probe_now(api_base: str, model: str, api_key: str = "") -> Verdict:
             return v
     _CACHE[key] = _Entry(None, _NEG_TTL, "unknown")
     return None
+
+# ponytail: This fix targets a specific bug (vision-capable ninfer
+# servers with /v1 api_bases getting False negatives) with minimal change.
+# The /v1-stripping heuristic in _rule_llamacpp_props handles the observed
+# root cause; if a server has a different props path scheme, the rule
+# returns None (unknown) and the probe falls through to later rules —
+# it does not produce a wrong False. The reactive #428 retry remains the
+# backstop for any case the probe misclassifies.
