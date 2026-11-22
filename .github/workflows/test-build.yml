@@ -7,6 +7,15 @@ name: Test Build
 # covers typecheck/tests on every push. Installers are attached as
 # workflow artifacts.
 
+env:
+  # #778: must stay IDENTICAL to the block in release.yml — the Linux
+  # sidecar test build freezes from the same pinned BASELINE (non-x86-64-v3)
+  # CPython as the release build. See release.yml for the full rationale.
+  PBS_RELEASE_TAG: "20261110"
+  PBS_VERSION: "3.12.16"
+  PBS_ASSET: "cpython-3.12.16+20261110-x86_64-unknown-linux-gnu-install_only.tar.gz"
+  PBS_SHA256: "c2f87d4b4e8db3abddb0f116c6ccfc503d0cbdbb9ee8faacddad1b679ec12e99"
+
 on:
   workflow_dispatch:
     inputs:
@@ -46,7 +55,28 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # #778: Linux must freeze from the pinned BASELINE (non-x86-64-v3)
+      # CPython — setup-python's Ubuntu 26.04 build is AVX2 (see release.yml).
+      # Same download/PATH-prepend as the release build; Windows keeps
+      # setup-python.
+      - name: Provision baseline CPython (Linux sidecar freeze)
+        if: matrix.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE_TAG}/${PBS_ASSET}"
+          echo "downloading $url"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/pbs.tar.gz" "$url"
+          echo "${PBS_SHA256}  ${RUNNER_TEMP}/pbs.tar.gz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/baseline-python"
+          tar -xzf "$RUNNER_TEMP/pbs.tar.gz" -C "$RUNNER_TEMP/baseline-python"
+          PYBIN="$RUNNER_TEMP/baseline-python/python/bin"
+          "$PYBIN/python" -VV
+          "$PYBIN/python" scripts/check_baseline_libpython.py
+          echo "$PYBIN" >> "$GITHUB_PATH"
+
       - uses: actions/setup-python@v5
+        if: matrix.os != 'Linux'
         with:
           python-version: "3.12"
 

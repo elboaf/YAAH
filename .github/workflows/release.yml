@@ -10,6 +10,21 @@ name: Release
 # one job per physical machine, four builds in parallel instead of two
 # machines serially building two artifacts each.
 
+env:
+  # #778: the Linux sidecar MUST be frozen from a BASELINE (non-x86-64-v3)
+  # CPython. The setup-python build on the self-hosted Ubuntu 26.04 pool is
+  # x86-64-v3 (AVX2); frozen libpython then SIGILLs on pre-Haswell CPUs
+  # (actions/setup-python#1390). The Linux build jobs download this pinned
+  # python-build-standalone install instead and prepend its bin/ to PATH, so
+  # `python`, `pip` and `python -m PyInstaller` all resolve to the baseline
+  # interpreter. Plain "x86_64-unknown-linux-gnu" is the baseline flavor —
+  # the _v2/_v3/_v4 flavors are the microarchitecture tiers. SHA-256 pins
+  # the artifact itself (same pattern as scripts/bundle_gh.sh).
+  PBS_RELEASE_TAG: "20261110"
+  PBS_VERSION: "3.12.16"
+  PBS_ASSET: "cpython-3.12.16+20261110-x86_64-unknown-linux-gnu-install_only.tar.gz"
+  PBS_SHA256: "c2f87d4b4e8db3abddb0f116c6ccfc503d0cbdbb9ee8faacddad1b679ec12e99"
+
 on:
   push:
     tags: ["v*"]
@@ -173,7 +188,32 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # #778: on Linux the FREEZE interpreter must be the baseline (non-v3)
+      # build pinned in the workflow-level env above — setup-python hands
+      # out an x86-64-v3 (AVX2) CPython on the Ubuntu 26.04 self-hosted
+      # pool (actions/setup-python#1390), whose libpython SIGILLs on
+      # pre-Haswell CPUs. The baseline tarball goes to $RUNNER_TEMP (wiped
+      # per job) and its bin/ is PREPENDED so `python`/`pip`/
+      # `python -m PyInstaller` all resolve to it. Windows cells keep
+      # setup-python untouched.
+      - name: Provision baseline CPython (Linux sidecar freeze)
+        if: matrix.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE_TAG}/${PBS_ASSET}"
+          echo "downloading $url"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/pbs.tar.gz" "$url"
+          echo "${PBS_SHA256}  ${RUNNER_TEMP}/pbs.tar.gz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/baseline-python"
+          tar -xzf "$RUNNER_TEMP/pbs.tar.gz" -C "$RUNNER_TEMP/baseline-python"
+          PYBIN="$RUNNER_TEMP/baseline-python/python/bin"
+          "$PYBIN/python" -VV
+          "$PYBIN/python" scripts/check_baseline_libpython.py
+          echo "$PYBIN" >> "$GITHUB_PATH"
+
       - uses: actions/setup-python@v5
+        if: matrix.os != 'Linux'
         with:
           python-version: "3.12"
 
@@ -224,6 +264,24 @@ jobs:
             bash scripts/build_server_deb.sh
             mv dist/yaah-server_*_all.deb yaah-server-setup.deb
           fi
+
+      # Regression gate (#778): disassemble the libpython that actually
+      # landed INSIDE the frozen executables and fail if AVX2-only
+      # mnemonics appear. The Linux onefile executables are PyInstaller
+      # CArchives — libpython is compressed inside, so objdump needs the
+      # raw bytes first: read the CArchive cookie + TOC directly (struct
+      # unpack of the documented format), decompress the libpython3.12.so
+      # entry with zlib, objdump -D it, and grep for the AVX2 mnemonics
+      # from the issue's repro. `python` here is the baseline interpreter
+      # provisioned above. Windows has no gate — setup-python's local
+      # build matches the Windows target CPUs there.
+      - name: Guard — Linux sidecar must not bundle AVX2-only libpython
+        if: matrix.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_avx2_gate.py dist/backend dist/yaah-server
+          echo "AVX2 gate passed: no AVX2-only instructions in bundled libpython"
 
       - name: Build (verbose, logged)
         if: matrix.artifact == 'desktop'
