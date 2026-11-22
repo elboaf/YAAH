@@ -1741,7 +1741,16 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
         # Stream exhausted — the conversation claim is released. Now fire
         # the follow-up wake so it starts a fresh turn on an idle chat.
         if deferred_handoff is not None and deferred_handoff:
-            for item in deferred_handoff:
+            # Deliver the first item's text directly as the resume prompt
+            # to the model (not enqueued for _take_injections), so it's in
+            # context on the first turn — not waiting for a tool call. The
+            # remaining items are enqueued normally and will be delivered
+            # via _take_injections at the next tool boundary.
+            first = deferred_handoff[0]
+            resume_text = first.get("text") or ""
+            if not resume_text:
+                resume_text = WAKE_RESUME_PROMPT
+            for item in deferred_handoff[1:]:
                 loop_mod.enqueue_message(
                     conversation_id,
                     item.get("text") or "",
@@ -1752,7 +1761,7 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
             asyncio.create_task(
                 wake_conversation(
                     conversation_id,
-                    WAKE_RESUME_PROMPT,
+                    resume_text,
                     source="wake-resume",
                 )
             )
