@@ -265,19 +265,19 @@ jobs:
             mv dist/yaah-server_*_all.deb yaah-server-setup.deb
           fi
 
-      # Regression gate (#778): disassemble the libpython that actually
-      # landed INSIDE the frozen executables and fail if AVX2-only
-      # mnemonics appear. The Linux onefile executables are PyInstaller
-      # CArchives — libpython is compressed inside, so objdump needs the
-      # raw bytes first: read the CArchive cookie + TOC directly (struct
-      # unpack of the documented format), decompress the libpython3.12.so
-      # entry with zlib, objdump -D it, and grep for the AVX2 mnemonics
-      # from the issue's repro. `python` here is the baseline interpreter
-      # provisioned above. Windows has no gate — setup-python's local
-      # build matches the Windows target CPUs there.
-      - name: Guard — Linux sidecar must not bundle AVX2-only libpython
-        if: matrix.os == 'Linux'
-        shell: bash
+      # Regression gate (#778): the libpython bundled INSIDE the frozen
+      # executables must be the baseline one. Presence of AVX2-only
+      # mnemonics proves nothing - the baseline libpython legitimately
+      # carries 76 of them in dispatch-gated crypto clusters - so the
+      # verdict is (1) sha256 chain of custody against the pinned
+      # artifact's measured libpython hash, then (2) a calibrated spread
+      # scan (3x measured baseline, min 25) that catches a v3-shaped
+      # body (488 hits) without rejecting baseline-shaped ones. The
+      # Linux onefile executables are PyInstaller CArchives - libpython
+      # is compressed inside, so the raw bytes are read via the CArchive
+      # cookie + TOC and zlib first. `python` here is the baseline
+      # interpreter provisioned above. Windows has no gate -
+      # setup-python's local build matches the Windows target CPUs.
         run: |
           set -euo pipefail
           python scripts/check_avx2_gate.py dist/backend dist/yaah-server
