@@ -9,6 +9,10 @@ import { searchConversations, type SearchMatch } from '../api'
  * conversations. Chat results are primary; tool and sub-agent
  * matches are grouped below with a muted style so the user can
  * opt into digging through them.
+ *
+ * Results stay open while the query is present and collapse when
+ * the user clicks outside the search UI (#794). The query text
+ * itself is never cleared by an outside click.
  */
 export function SidebarSearch({
   onOpenConversation,
@@ -22,6 +26,7 @@ export function SidebarSearch({
   // The trimmed query the visible results/error belong to (#764): a
   // result set renders only while its own query is still in the box.
   const [resultQuery, setResultQuery] = useState('')
+  const [closed, setClosed] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [error, setError] = useState<string | null>(null)
   const searchId = useRef(0)
@@ -30,6 +35,7 @@ export function SidebarSearch({
   // minutes-long wedge. The backend scan is now bounded (#764), but a
   // superseded query's answer is dropped anyway -- never render stale.
   const abortRef = useRef<AbortController | null>(null)
+  const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -41,8 +47,11 @@ export function SidebarSearch({
       setSearched(false)
       setLoading(false)
       setError(null)
+      setClosed(false)
       return
     }
+    // Re-opening when the user types again
+    setClosed(false)
 
     searchId.current++
     const myId = searchId.current
@@ -91,8 +100,20 @@ export function SidebarSearch({
   const toolMatches = matches.filter((m) => m.kind === 'tool')
   const subagentMatches = matches.filter((m) => m.kind === 'sub-agent')
 
+  // Collapse results when clicking outside the search UI (#794)
+  useEffect(() => {
+    if (closed) return
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setClosed(true)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [closed])
+
   return (
-    <div className="lg-search border-b border-zinc-700/50 bg-zinc-900/50 px-1.5 py-1">
+    <div className="lg-search border-b border-zinc-700/50 bg-zinc-900/50 px-1.5 py-1" ref={containerRef}>
       {/* Search input */}
       <div className="flex items-center gap-1.5 border border-zinc-700 rounded px-2 py-1.5 focus-within:border-blue-500 bg-zinc-800">
         <svg
@@ -125,8 +146,9 @@ export function SidebarSearch({
       </div>
 
       {/* Results: only for the query currently in the box (#764) -- a
-          previous query's matches never linger while a new one loads. */}
-      {query.trim() && (
+          previous query's matches never linger while a new one loads.
+          Dismissed on outside click (#794). */}
+      {query.trim() && !closed && (
         <div className="mt-1.5 max-h-72 overflow-y-auto">
         {error && resultQuery === query.trim() && (
           <p className="px-2 py-1.5 text-xs text-red-400 bg-red-950/30 rounded">

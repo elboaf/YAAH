@@ -188,4 +188,38 @@ describe('SidebarSearch (#676)', () => {
     fireEvent.change(input, { target: { value: 'two' } })
     expect(screen.getByText('Searching…')).toBeInTheDocument()
   })
+  it('collapses results on outside click (#794)', async () => {
+    ;(searchConversations as ReturnType<typeof vi.fn>).mockResolvedValue({
+      count: 1,
+      matches: [mockMatches[0]],
+      truncated: false,
+    })
+    render(<SidebarSearch onOpenConversation={vi.fn()} />)
+    const input = screen.getByPlaceholderText('Search conversations…')
+    fireEvent.change(input, { target: { value: 'schema' } })
+    await waitFor(() => expect(screen.getByText('Chat A')).toBeInTheDocument(), { timeout: 1000 })
+    // Click outside the search container
+    fireEvent.mouseDown(document.body)
+    // Results should be hidden but query text remains
+    expect(screen.queryByText('Chat A')).not.toBeInTheDocument()
+    expect(input.value).toBe('schema')
+  })
+
+  it('re-opens results when user types again after outside click (#794)', async () => {
+    ;(searchConversations as ReturnType<typeof vi.fn>).mockResolvedValue({
+      count: 1,
+      matches: [mockMatches[0]],
+      truncated: false,
+    })
+    render(<SidebarSearch onOpenConversation={vi.fn()} />)
+    const input = screen.getByPlaceholderText('Search conversations…')
+    fireEvent.change(input, { target: { value: 'schema' } })
+    await waitFor(() => expect(screen.getByText('Chat A')).toBeInTheDocument(), { timeout: 1000 })
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByText('Chat A')).not.toBeInTheDocument()
+    // Type a different query - results should re-appear
+    fireEvent.change(input, { target: { value: 'schema design' } })
+    await waitFor(() => expect(screen.getByText('Chat A')).toBeInTheDocument(), { timeout: 1000 })
+  })
+
 })
