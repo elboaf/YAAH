@@ -5631,8 +5631,12 @@ function WorkersDialog({
                     className="rounded px-1.5 py-0.5 text-[10px] text-zinc-400 hover:bg-zinc-800 hover:text-red-400"
                     title="Delete this worker chat (its desk survives for the next occupant)"
                     onClick={async () => {
-                      await deleteConversation(w.id).catch(() => {})
-                      refresh()
+                      try {
+                        await deleteConversation(w.id)
+                        refresh()
+                      } catch (e) {
+                        pushToast({ kind: 'error', title: 'Delete failed', body: String((e as Error)?.message ?? e) })
+                      }
                     }}
                   >
                     delete

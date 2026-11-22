@@ -232,17 +232,25 @@ def _workspace_git_available() -> bool:
 
 
 async def _run_git(args: list[str], cwd: Path | None = None) -> tuple[int, str]:
-    """One plain git invocation (clone/fetch/reset plumbing). Never raises."""
+    """One plain git invocation (clone/fetch/reset plumbing). Never raises.
+    Timeout at 120s to prevent a hung git call from permanently wedging
+    the workspace's spawn pool (claim_desk runs under the pool lock)."""
     exe = git_exe() or "git"
-    proc = await asyncio.create_subprocess_exec(
-        exe, "--no-optional-locks", *args,
-        cwd=str(cwd) if cwd is not None else None,
-        env=_git_env(),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    out, _ = await proc.communicate()
-    return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
+    try:
+        proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                exe, "--no-optional-locks", *args,
+                cwd=str(cwd) if cwd is not None else None,
+                env=_git_env(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            ),
+            timeout=5,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+        return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
+    except (asyncio.TimeoutError, OSError) as e:
+        return 124 if isinstance(e, asyncio.TimeoutError) else 1, str(e)
 
 
 async def _head_commit(git_dir: Path) -> str:
@@ -341,6 +349,18 @@ def _reservation_expired(data: dict) -> bool:
     return (time.time() - reserved_at) > RESERVATION_TTL
 
 
+def _read_marker(seat_dir: Path) -> dict:
+    """Read and parse a seat's marker file; return {} on any failure.
+    Centralizes the read-parse-guard pattern that appeared 7 times."""
+    marker = seat_dir / DESK_MARKER
+    if not marker.is_file():
+        return {}
+    try:
+        return json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — unreadable marker = unseated
+        return {}
+
+
 async def claim_desk(workspace: str | None) -> dict:
     """Claim a seat from the workspace's pool, cloning or handing over as
     needed. Returns the seat descriptor. Fails loudly at the pool cap."""
@@ -362,12 +382,7 @@ async def claim_desk(workspace: str | None) -> dict:
         marker = seat_dir / DESK_MARKER
         occupant = None
         if marker.is_file():
-            try:
-                occupant = json.loads(marker.read_text(encoding="utf-8")).get(
-                    "worker_conversation_id"
-                )
-            except Exception:  # noqa: BLE001 — unreadable marker = unseated
-                occupant = None
+            occupant = _read_marker(seat_dir).get("worker_conversation_id")
         if occupant:
             # A seat reserved by an in-flight spawn (or by a spawner that
             # died within the TTL) is NOT free; past the TTL it is stale
@@ -375,10 +390,7 @@ async def claim_desk(workspace: str | None) -> dict:
             if str(occupant).isdigit():
                 continue
             if marker.is_file():
-                try:
-                    reserved = json.loads(marker.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001
-                    reserved = {}
+                reserved = _read_marker(seat_dir)
                 if not _reservation_expired(reserved):
                     continue
         hand = await handover(workspace, seat_dir)
@@ -424,12 +436,7 @@ async def _write_marker(
     seat_dir: Path, worker_conversation_id: int | None, reserved_by: str | None = None
 ) -> None:
     marker = seat_dir / DESK_MARKER
-    data: dict = {"worker_conversation_id": worker_conversation_id}
-    try:
-        if marker.is_file():
-            data = json.loads(marker.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        data = {}
+    data = _read_marker(seat_dir)
     data["worker_conversation_id"] = worker_conversation_id
     if reserved_by:
         data["reserved_by"] = reserved_by
@@ -437,7 +444,10 @@ async def _write_marker(
     else:
         data.pop("reserved_by", None)
         data.pop("reserved_at", None)
-    marker.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    content = json.dumps(data, indent=2)
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, marker)
 
 
 async def claim_desk_for_spawn(workspace: str | None) -> dict:
@@ -487,11 +497,7 @@ async def abandon_reservation(workspace: str | None, seat: dict) -> None:
         return
     lock = _SEAT_LOCKS.setdefault(workspace, asyncio.Lock())
     async with lock:
-        marker = dir_path / DESK_MARKER
-        try:
-            data = json.loads(marker.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            data = {}
+        data = _read_marker(dir_path)
         if data.get("reserved_by") == token:
             await _write_marker(dir_path, None)
 
@@ -508,10 +514,7 @@ async def release_desk(workspace: str | None, worker_conversation_id: int) -> di
         marker = seat_dir / DESK_MARKER
         if not marker.is_file():
             continue
-        try:
-            data = json.loads(marker.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            continue
+        data = _read_marker(seat_dir)
         if data.get("worker_conversation_id") == worker_conversation_id:
             await _write_marker(seat_dir, None)
             return {"seat": int(seat_dir.name), "dir": str(seat_dir)}
@@ -582,10 +585,7 @@ def find_seat(workspace: str | None, worker_conversation_id: int) -> dict | None
         marker = seat_dir / DESK_MARKER
         if not marker.is_file():
             continue
-        try:
-            data = json.loads(marker.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            continue
+        data = _read_marker(seat_dir)
         if data.get("worker_conversation_id") == worker_conversation_id:
             return {"seat": int(seat_dir.name), "dir": str(seat_dir)}
     return None
@@ -598,15 +598,7 @@ def pool_status(workspace: str | None) -> dict:
         for seat_dir in sorted(pool.iterdir()):
             if not (seat_dir.is_dir() and seat_dir.name.isdigit()):
                 continue
-            occupant = None
-            marker = seat_dir / DESK_MARKER
-            if marker.is_file():
-                try:
-                    occupant = json.loads(marker.read_text(encoding="utf-8")).get(
-                        "worker_conversation_id"
-                    )
-                except Exception:  # noqa: BLE001
-                    occupant = None
+            occupant = _read_marker(seat_dir).get("worker_conversation_id")
             seats.append({"seat": int(seat_dir.name), "worker_conversation_id": occupant})
     return {"pool": str(pool), "cap": pool_cap(), "seats": seats}
 
@@ -957,7 +949,7 @@ async def review_contribution_tool(
                     ),
                 }
         rc, status = await run_git(conv_ws, "status", "--porcelain")
-        if rc == 0 and status.strip():
+        if rc != 0 or status.strip():
             return {
                 "deferred": True,
                 "error": (

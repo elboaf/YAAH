@@ -1174,13 +1174,16 @@ async def api_delete_conversation(conversation_id: int):
         raise HTTPException(status_code=404, detail="conversation not found")
     # Database row is gone; now free the worker's desk seat.
     if is_worker and conv_ws and not conv_ws.startswith("remote:"):
-        row = desks_mod.pending_contribution(conv_ws, conversation_id)
-        if row is not None:
-            desks_mod.update_contribution(
-                conv_ws, row["id"], status="abandoned",
-                review="worker chat deleted",
-            )
-        await desks_mod.release_desk(conv_ws, conversation_id)
+        try:
+            row = desks_mod.pending_contribution(conv_ws, conversation_id)
+            if row is not None:
+                desks_mod.update_contribution(
+                    conv_ws, row["id"], status="abandoned",
+                    review="worker chat deleted",
+                )
+            await desks_mod.release_desk(conv_ws, conversation_id)
+        except Exception:  # noqa: BLE001 — don't fail the delete on seat cleanup
+            log.exception("failed to release desk seat after worker deletion")
     return {"ok": True}
 
 
