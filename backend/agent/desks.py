@@ -333,7 +333,13 @@ async def handover(workspace: str | None, seat_dir: Path) -> dict:
     # they do not survive a handover). A ref-less `git reset --hard` resets
     # index + worktree to HEAD without moving ANY branch ref — the branch
     # moving hazard below is about `reset --hard <ref>`, not this form.
-    await _run_git(["reset", "--hard"], cwd=seat_dir)
+    rc, out = await _run_git(["reset", "--hard"], cwd=seat_dir)
+    if rc != 0:
+        return {
+            "branch": branch,
+            "notes": [f"reset --hard failed: {out.strip()[:200]}"],
+            "failed": True,
+        }
     #
     # Then repoint THE INTEGRATION BRANCH, not whichever branch a
     # predecessor left checked out: `git reset --hard <ref>` moves the
