@@ -54,6 +54,19 @@ MODELS_ROUTER = {
     ],
 }
 
+# Ninfer router: vision baked into artifact, no --mmproj, no llama-server argv
+NINF_MODELS = {
+    "data": [
+        {"id": "llava-artifact", "status": {"value": "loaded", "args": [
+            "/usr/bin/ninfer", "serve", "--artifact", "llava-artifact",
+            "--vision", "--vision-residency", "overlay",
+        ]}},
+        {"id": "text-only-artifact", "status": {"value": "loaded", "args": [
+            "/usr/bin/ninfer", "serve", "--artifact", "text-only-artifact",
+        ]}},
+    ],
+}
+
 OPENROUTER_ENTRY = {
     "data": [{
         "id": "z-ai/glm-5.3-flash",
@@ -546,3 +559,29 @@ async def test_unknown_verdict_leaves_pixels_intact(monkeypatch):
     assert calls["image_parts"][0] >= 1, "pixels must ride untouched"
     notes = [e for e in events if e.get("type") == "note"]
     assert not notes, "no note for an unknown/true provider"
+
+
+async def test_ninfer_vision_flag_not_mmproj(config_only, monkeypatch):
+    """#796: ninfer router with --vision flag (no --mmproj) must return True,
+    not False. Server uses --vision for baked-in projectors, not --mmproj."""
+    config_only()
+    t = _transport({
+        "/v1/models": (200, NINF_MODELS),
+        "/props": (200, PROPS_NO_MODALITIES),  # props can't decide
+    })
+    _patch_client(monkeypatch, t)
+    # llava-artifact has --vision in argv -> True
+    assert await vision_mod.probe_now("http://local.test", "llava-artifact") is True
+    # text-only-artifact has no vision flags, non-llama.cpp argv -> None (unknown)
+    assert await vision_mod.probe_now("http://local.test", "text-only-artifact") is None
+
+
+async def test_props_rule_strips_v1_suffix(config_only, monkeypatch):
+    """#796: /props endpoint lives at server root even when api_base ends in
+    /v1 (ninfer, llama.cpp itself). Rule must rebase to find it."""
+    config_only()
+    # Server responds to /props but NOT /v1/props
+    t = _transport({"/props": (200, PROPS_VISION_FALSE)})
+    _patch_client(monkeypatch, t)
+    # api_base with trailing /v1 should still find /props at root
+    assert await vision_mod.probe_now("http://local.test/v1", "m") is False
