@@ -232,15 +232,31 @@ def _build_payload(
     cfg: dict, tools: list | None, stream: bool, max_tokens: int | None = None
 ) -> dict:
     """The chat-completions request body. Pure so the param-gating rules are
-    unit-testable without HTTP."""
-    # Let the selected model/provider apply its own generation defaults and
-    # output cap. Temperature is intentionally not sent, and max_tokens
-    # only when a caller explicitly caps the call (slotcache aux prefill).
+    unit-testable without HTTP.
+
+    Generation knobs stay with the provider unless a provider block opts in:
+    temperature/post_thinking ride only when the RESOLVED call's provider
+    block sets them (issue #799 — ninfer resolves omitted fields to the
+    model-registered sampler, and its answer phase otherwise inherits the
+    thinking-phase one); everything else keeps the documented no-send
+    behavior and max_tokens rides only when a caller explicitly caps the
+    call (slotcache aux prefill).
+    """
     payload = {
         "model": cfg["model"],
         "messages": [],
         "stream": stream,
     }
+    # #799: knobs come from the resolved call's provider block, so a
+    # per-chat provider::model override applies that provider's values.
+    # Top-level config stays ignored (#411); a block without the keys
+    # sends nothing, exactly as before.
+    block = (cfg.get("providers") or {}).get(cfg.get("active_provider") or "")
+    if block:
+        if block.get("temperature") is not None:
+            payload["temperature"] = block["temperature"]
+        if isinstance(block.get("post_thinking"), dict):
+            payload["post_thinking"] = dict(block["post_thinking"])
     # Reasoning effort is set per chat (or inherited from the new-chat
     # default in the sidebar); blank means use the provider default.
     effort = (cfg.get("reasoning_effort") or "").strip().lower()
