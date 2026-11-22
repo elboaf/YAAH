@@ -202,7 +202,7 @@ describe('SidebarSearch (#676)', () => {
     fireEvent.mouseDown(document.body)
     // Results should be hidden but query text remains
     expect(screen.queryByText('Chat A')).not.toBeInTheDocument()
-    expect(input.value).toBe('schema')
+    expect((input as HTMLInputElement).value).toBe('schema')
   })
 
   it('re-opens results when user types again after outside click (#794)', async () => {
