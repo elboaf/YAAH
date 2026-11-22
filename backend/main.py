@@ -1149,29 +1149,38 @@ async def api_delete_conversation(conversation_id: int):
     # ADR-0022: deleting a worker chat releases its desk seat (the desk
     # directory itself outlives the chat — the next occupant inherits it)
     # and abandons any pending contribution so the inbox never dangles.
+    # The desk must be released AFTER the database row is gone and only if
+    # the worker holds no active turn; otherwise a new worker could claim
+    # the freed seat while the old turn is still running on it.
     from backend.agent import desks as desks_mod
+    from backend.agent.loop import agent_is_running
 
     conv = await get_conversation(conversation_id)
-    if conv is not None and (conv.get("chat_type") or "chat") == "worker":
+    is_worker = conv is not None and (conv.get("chat_type") or "chat") == "worker"
+    if is_worker and agent_is_running(conversation_id):
+        raise HTTPException(
+            status_code=409,
+            detail="worker is still running — wait for it to finish or "
+            "stop it before deleting",
+        )
+    conv_ws = None
+    if is_worker:
         conv_ws = (conv.get("workspace") or "").strip()
-        if conv_ws and not conv_ws.startswith("remote:"):
-            row = desks_mod.pending_contribution(conv_ws, conversation_id)
-            if row is not None:
-                desks_mod.update_contribution(
-                    conv_ws, row["id"], status="abandoned",
-                    review="worker chat deleted",
-                )
-            # release_desk is a coroutine: without the await its body never
-            # runs, the stale marker stays, the seat counts against the
-            # pool cap forever, and no cleanup path clears it.
-            await desks_mod.release_desk(conv_ws, conversation_id)
     try:
         ok = await delete_conversation(conversation_id)
     except RemoteProtocolError as error:
         raise _remote_protocol_error(error)
     if not ok:
-
         raise HTTPException(status_code=404, detail="conversation not found")
+    # Database row is gone; now free the worker's desk seat.
+    if is_worker and conv_ws and not conv_ws.startswith("remote:"):
+        row = desks_mod.pending_contribution(conv_ws, conversation_id)
+        if row is not None:
+            desks_mod.update_contribution(
+                conv_ws, row["id"], status="abandoned",
+                review="worker chat deleted",
+            )
+        await desks_mod.release_desk(conv_ws, conversation_id)
     return {"ok": True}
 
 
@@ -1705,7 +1714,13 @@ async def wake_conversation(conversation_id: int, prompt: str, source: str = "")
                 effort_override=effort,
                 subagent_scope=subagent_scope,
             ):
+                # Two refusal cases: busy (idle→busy race) and claim_refused
+                # (remote edit lease). Both mean the prompt was not consumed;
+                # re-enqueue it and let a later wake pick it up.
                 if '"kind": "busy"' in line or '"kind":"busy"' in line:
+                    loop_mod.enqueue_message(conversation_id, prompt)
+                    return
+                if '"kind": "claim_refused"' in line or '"kind":"claim_refused"' in line:
                     loop_mod.enqueue_message(conversation_id, prompt)
                     return
                 if '"type": "queued_autosend"' in line or '"type":"queued_autosend"' in line:
