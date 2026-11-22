@@ -403,6 +403,18 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN remote_revision_counter INTEGER NOT NULL DEFAULT 1"
         )
+    if "worker_parent_id" not in conv_cols:
+        # ADR-0022 developer world: a worker chat's parent ordinary chat.
+        # chat_type='worker' rows carry this; NULL = not a worker. The
+        # desk directory lives beside it (desk_dir) so a re-seat never
+        # rewrites the lineage.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN worker_parent_id INTEGER"
+        )
+    if "desk_dir" not in conv_cols:
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN desk_dir TEXT"
+        )
     if "frozen_system_prompt" not in conv_cols:
         # Per-provider static system prompt (local-model prompt caching):
         # the byte-exact prompt head the conversation froze on its first
@@ -957,6 +969,8 @@ async def create_conversation(
     model: str | None = None,
     effort: str | None = None,
     subagent_model: str = "",
+    worker_parent_id: int | None = None,
+    desk_dir: str | None = None,
 ):
     """Create a conversation. model/effort: the chat's pinned scope (#51/#76).
     Blank strings are legal writes (the chat's deliberate Default); None
@@ -985,9 +999,10 @@ async def create_conversation(
     workspace = normalize_workspace(workspace)
     async with open_db() as db:
         cur = await db.execute(
-            "INSERT INTO conversations (title, workspace, chat_type, model, effort, subagent_model)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (title, workspace, chat_type, model, effort, subagent_model),
+            "INSERT INTO conversations (title, workspace, chat_type, model, effort, subagent_model, worker_parent_id, desk_dir)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (title, workspace, chat_type, model, effort, subagent_model,
+             worker_parent_id, desk_dir),
         )
         await db.commit()
         return cur.lastrowid
@@ -1030,6 +1045,26 @@ async def delete_conversation(conversation_id: int) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+async def list_worker_children(conversation_id: int) -> list[dict]:
+    """The worker chats parented by an ordinary chat (ADR-0022)."""
+    async with open_db() as db:
+        cur = await db.execute(
+            "SELECT * FROM conversations WHERE worker_parent_id = ?"
+            " ORDER BY id ASC",
+            (conversation_id,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def is_worker_conversation(conversation_id: int) -> bool:
+    async with open_db() as db:
+        cur = await db.execute(
+            "SELECT chat_type FROM conversations WHERE id = ?", (conversation_id,)
+        )
+        row = await cur.fetchone()
+        return bool(row) and (row[0] or "chat") == "worker"
 
 
 class RemoteProtocolError(Exception):
@@ -1080,6 +1115,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
         "model",
         "effort",
         "subagent_model",
+        "desk_dir",
     }
     updates = {
         k: normalize_workspace(v) if k == "workspace" else v

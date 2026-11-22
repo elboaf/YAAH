@@ -86,6 +86,14 @@ _ALWAYS_EXCLUDED = {
     "generate_image",
     "edit_image",
     "upscale_image",
+    # Developer world (ADR-0022): sub-agents never create or manage chats —
+    # spawning workers, messaging workers, and inbox review are supervisor
+    # chat surfaces. (submit_contribution stays reachable for a worker's
+    # own sub-agents: they inherit the desk, and the executor's chat_type
+    # check refuses it for any non-worker conversation.)
+    "spawn_worker",
+    "message_worker",
+    "review_contribution",
 }
 
 _EXPLORE_TOOLS = {
