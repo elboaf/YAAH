@@ -257,6 +257,30 @@ def test_worker_turn_reroots_tools_not_prompt(ws_repo, tmp_path):
                 yield {"type": "finish"}
             return _s()
 
+        # Second-turn fake: answers the read_file tool call with a real
+        # tool_calls stream event (the shape model_client emits), then a
+        # plain reply once the tool result is in history - otherwise the
+        # turn never terminates.
+        async def fake_chat_toolcall(messages, tools=None, stream=True, **kwargs):
+            saw_tool = any(m.get("role") == "tool" for m in messages)
+
+            async def _s():
+                if not saw_tool:
+                    yield {
+                        "type": "tool_calls",
+                        "tool_calls": [{
+                            "id": "call-readme",
+                            "function": {
+                                "name": "read_file",
+                                "arguments": json.dumps({"path": "README.md"}),
+                            },
+                        }],
+                    }
+                else:
+                    yield {"type": "content", "text": "done"}
+                yield {"type": "finish"}
+            return _s()
+
         orig_chat = loop.model_client.chat
         loop.model_client.chat = fake_chat
         try:
@@ -264,32 +288,53 @@ def test_worker_turn_reroots_tools_not_prompt(ws_repo, tmp_path):
                 cid, "write the marker file", str(ws_repo),
             ):
                 pass
+
+            system = captured["messages"][0]["content"]
+            # Prompt surface stays on the workspace: the project note
+            # travels, the desk does not appear in the env line...
+            assert "PROJ-NOTE" in system
+            assert f"The selected workspace is {ws_repo}" in system
+            # ...but the worker fragment names the desk and the rules.
+            assert str(seat["dir"]) in system
+            assert "submit_contribution" in system
+            assert "Worker chat" in system
+            # Workers never see the spawn tools.
+            assert "spawn_worker" not in captured["tools"]
+            assert "spawn_agent" not in captured["tools"]
+
+            # Verify the loop actually dispatches to the desk workspace (not
+            # just that a manual executor call would work there). The fake
+            # model emits a real read_file tool call; the wrapper captures
+            # the workspace the loop hands execute_tool while the REAL
+            # dispatch still runs underneath.
+            dispatched = []
+            orig_dispatch = loop.execute_tool
+
+            async def capture_dispatch(name, args, workspace, **kwargs):
+                dispatched.append((name, workspace))
+                return await orig_dispatch(name, args, workspace, **kwargs)
+
+            loop.model_client.chat = fake_chat_toolcall
+            loop.execute_tool = capture_dispatch
+            try:
+                # Same live conversation row: the re-root must hand the
+                # loop the desk as the turn workspace.
+                async for _ev in loop._run_agent_claimed(
+                    cid, "read the readme", str(ws_repo),
+                ):
+                    pass
+            finally:
+                loop.execute_tool = orig_dispatch
+                loop.model_client.chat = fake_chat
+            assert len(dispatched) >= 1, "the turn never dispatched a tool call"
+            tool_name, dispatched_ws = dispatched[0]
+            assert tool_name == "read_file"
+            # Every dispatch of the turn landed in the desk, not the checkout.
+            assert all(ws == str(seat["dir"]) for _, ws in dispatched), dispatched
         finally:
             loop.model_client.chat = orig_chat
             await delete_conversation(cid)
             await delete_conversation(parent)
-
-        system = captured["messages"][0]["content"]
-        # Prompt surface stays on the workspace: the project note travels,
-        # the desk does not appear in the env line...
-        assert "PROJ-NOTE" in system
-        assert f"The selected workspace is {ws_repo}" in system
-        # ...but the worker fragment names the desk and the rules.
-        assert str(seat["dir"]) in system
-        assert "submit_contribution" in system
-        assert "Worker chat" in system
-        # Workers never see the spawn tools.
-        assert "spawn_worker" not in captured["tools"]
-        assert "spawn_agent" not in captured["tools"]
-        # read/write resolve inside the desk: run one executor by hand
-        # against the same re-root the loop would pass.
-        from backend.agent.tools import execute_tool
-        result = await execute_tool(
-            "read_file", {"path": "README.md"},
-            str(seat["dir"]), conversation_id=cid,
-            memory_workspace=str(ws_repo),
-        )
-        assert "hello" in str(result)
 
     import asyncio
     asyncio.run(run())
