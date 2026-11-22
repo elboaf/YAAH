@@ -2827,8 +2827,13 @@ async def _run_agent_claimed(
                 # retrieves any that still escape). Strong-ref set follows
                 # the scheduler's precedent: an unreferenced create_task
                 # can be garbage-collected mid-run.
+                # #681: worker turns run in the desk but extraction must
+                # write under the PROJECT workspace key — otherwise
+                # durable facts land in a store that ordinary chats (and
+                # the worker prompts) never read. Pass workspace, not
+                # turn_workspace.
                 _ext = asyncio.create_task(
-                    extract_mod.schedule(conversation_id, turn_workspace)
+                    extract_mod.schedule(conversation_id, workspace)
                 )
                 _extract_tasks.add(_ext)
                 _ext.add_done_callback(_extract_done)
