@@ -32,7 +32,13 @@ import sysconfig
 # than every CPU this fix targets.
 AVX2_ONLY = ("vinserti128", "vperm2i128", "vpgatherdd")
 
-PBS_VERSION = os.environ.get("PBS_VERSION", "")
+
+def _pbs_version():
+    """The pinned version, read at CALL time. CI exports PBS_VERSION at the
+    job level, so a module-level constant would bake the real pin in at
+    import and make the unpinned-refusal test's runtime monkeypatch a
+    no-op (the DID-NOT-RAISE CI failure on PR #803)."""
+    return os.environ.get("PBS_VERSION", "")
 
 
 def fail(msg):
@@ -98,14 +104,15 @@ def main():
     if "x86_64_v3" in base_exec or "x86_64_v2" in base_exec or "x86_64_v4" in base_exec:
         fail(f"flavor build detected via sys._base_executable: {base_exec}")
 
-    # 3) exact pinned version
-    if not PBS_VERSION:
+    # 3) exact pinned version (read at call time - see _pbs_version)
+    pinned = _pbs_version()
+    if not pinned:
         fail("PBS_VERSION env var missing; refusing to verify unpinned interpreter")
-    expected = tuple(int(p) for p in PBS_VERSION.split("."))
+    expected = tuple(int(p) for p in pinned.split("."))
     if sys.version_info[:3] != expected:
         fail(
             f"interpreter version {'.'.join(map(str, sys.version_info[:3]))} "
-            f"!= pinned PBS_VERSION {PBS_VERSION}"
+            f"!= pinned PBS_VERSION {pinned}"
         )
 
     v = sys.version_info
