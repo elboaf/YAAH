@@ -668,7 +668,7 @@ async def spawn_worker_tool(
     Creates a chat_type='worker' conversation parented by the calling
     chat, seats it at a desk from the workspace's pool, and fires `task`
     as its first turn via the shared wake primitive."""
-    from backend.db.database import create_conversation, get_conversation
+    from backend.db.database import create_conversation, delete_conversation, get_conversation
     from backend.main import wake_conversation
 
     if conversation_id is None:
