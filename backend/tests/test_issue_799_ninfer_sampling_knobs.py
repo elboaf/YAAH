@@ -78,9 +78,9 @@ def test_bare_ninfer_block_gets_the_shipped_cooled_default():
     # block must not send the answer phase into the thinking sampler.
     cfg = _cfg(providers={"ninfer": {"api_base": "http://x", "model": "m"}})
     payload = _build_payload(cfg, None, False)
-    assert payload["post_thinking"] == {"temperature": 0.2}
+    assert payload["post_thinking"] == {"temperature": 1.0}
     assert "temperature" not in payload  # no shipped top-level temp default
-    assert _build_payload(cfg, None, True)["post_thinking"] == {"temperature": 0.2}
+    assert _build_payload(cfg, None, True)["post_thinking"] == {"temperature": 1.0}
 
 
 def test_explicit_ninfer_null_disables_the_default():
