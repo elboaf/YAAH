@@ -294,7 +294,7 @@ def bodies_for_prompt(names: list[str]) -> str:
         if s is None:
             continue
         parts.append(
-            f"# Skill: {s.name}\n\n"
+            f"# Loaded skill: {s.name}\n\n"
             f"The skill's folder (any supporting files it references live "
             f"here) is: {Path(s.path).parent}\n\n{s.body}"
         )
