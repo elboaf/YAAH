@@ -80,7 +80,7 @@ def test_bodies_for_prompt(skills_dir):
     # #193: unknown names are skipped here (reported as events by the loop,
     # via split_known_unknown) so they never enter the authoritative block.
     bodies = skill_registry.bodies_for_prompt(["review", "nope"])
-    assert "# Skill: review" in bodies
+    assert "# Loaded skill: review" in bodies
     assert "Review code carefully." in bodies
     assert "nope" not in bodies
     known, unknown = skill_registry.split_known_unknown(["review", "nope"])
@@ -258,7 +258,7 @@ def test_ensure_dir_seeds_bundled_into_existing_dir(skills_dir, monkeypatch):
 def test_bodies_include_skill_folder(skills_dir):
     skill_registry.scan_skills()
     bodies = skill_registry.bodies_for_prompt(["review"])
-    assert "# Skill: review" in bodies
+    assert "# Loaded skill: review" in bodies
     assert str(skills_dir / "review") in bodies
 
 
