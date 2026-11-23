@@ -1,4 +1,7 @@
 """Persistent per-project memory: markdown files under ~/.yaah/memory/.
+Agents must consult this memory before acting on any task.
+Agents must consult this memory before acting on any task.
+Agents must consult this memory before acting on any task.
 
 ZCode-style: one fact per file (a slug like ``user-prefers-dark-ui.md``
 with frontmatter: ``name``, ``description``, ``metadata.type``) plus a
@@ -250,6 +253,11 @@ def delete_memory(workspace: str | None, name: str) -> dict:
 
 # ------------------------------------------------------------ prompt side
 
+_CONSULT_MEMORY = """\
+## Consult memory before acting
+Before acting on any task, check your persistent memory for relevant facts, rules, and past experiences. Use memory_search to find entries matching the task. Memory contains project-specific rules, user preferences, past mistakes, and workflow lessons that should inform your approach. Do not skip this step — memory is how the agent avoids repeating past mistakes.
+"""
+
 _WHEN_TO_SAVE = """\
 ## When to save a memory
 Memory is a model of the owner, not a log of actions. Before saving, \
@@ -386,5 +394,6 @@ def index_for_prompt(workspace: str | None) -> str:
         f"{body}\n\n"
         "Maintain this memory with the memory_save, memory_read, "
         "memory_delete tools.\n\n"
-        f"{_WHEN_TO_SAVE}"
+        f"{_WHEN_TO_SAVE}\n\n"
+        f"{_CONSULT_MEMORY}"
     )
