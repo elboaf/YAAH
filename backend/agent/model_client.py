@@ -194,7 +194,7 @@ def strip_image_parts(messages: list) -> tuple[list, int]:
 # ships IN CODE so every machine gets it, not just machines whose local
 # config.json carries the #799 snippet. A provider block's explicit value
 # still wins; an explicit JSON null turns the default off.
-NINFER_DEFAULT_POST_THINKING = {"temperature": 0.2}
+NINFER_DEFAULT_POST_THINKING = {"temperature": 1.0}
 
 CHAT_CONNECT_TIMEOUT = 10
 CHAT_READ_TIMEOUT = 3600
