@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, fireEvent, waitFor, cleanup } from '@testing-library/react'
 import { useAgent } from './store'
 import { Composer, MessageView } from './components'
+import { typeIntoComposer } from './composer/testUtils'
 
 const { getConfig, createConversation, listConversations, getMessages, getAgentTape } =
   vi.hoisted(() => ({
@@ -87,8 +88,8 @@ describe('live tool_start creates the call row (b1f4629 regression)', () => {
       '{"type":"text","text":"Here it is."}\n' +
       '{"type":"done"}\n'
     render(<Composer />)
-    const box = document.querySelector('textarea') as unknown as HTMLElement
-    fireEvent.change(box, { target: { value: 'make an image' } })
+    const box = document.querySelector('[role="textbox"]') as unknown as HTMLElement
+    await typeIntoComposer(box, 'make an image')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     // The result must attach to the live call row (finishToolCall matches
@@ -123,8 +124,8 @@ describe('live tool_start creates the call row (b1f4629 regression)', () => {
       '{"type":"tool_result","name":"spawn_agent","call_id":"call_sp1","result":{"error":"unknown agent type: bogus"}}\n' +
       '{"type":"done"}\n'
     render(<Composer />)
-    const box = document.querySelector('textarea') as unknown as HTMLElement
-    fireEvent.change(box, { target: { value: 'delegate nothing' } })
+    const box = document.querySelector('[role="textbox"]') as unknown as HTMLElement
+    await typeIntoComposer(box, 'delegate nothing')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     await waitFor(() => {

@@ -69,6 +69,7 @@ vi.mock('./api', async (importOriginal) => {
 import { getConversation } from './api'
 import { ChatPanel } from './components'
 import { convWorkspaceCache, useAgent } from './store'
+import { typeIntoComposer } from './composer/testUtils'
 
 beforeEach(() => {
   streamCalls.length = 0
@@ -98,9 +99,9 @@ afterEach(() => {
 describe('end-of-run queue drain targets the conversation that ran (#460)', () => {
   it('a drain from a draft-born run never opens a second chat — it continues conversation 7', async () => {
     render(<ChatPanel />)
-    const textarea = await screen.findByLabelText('Message the agent')
-    fireEvent.change(textarea, { target: { value: 'first' } })
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    const box = await screen.findByLabelText('Message the agent')
+    await typeIntoComposer(box, 'first')
+    fireEvent.keyDown(box, { key: 'Enter' })
 
     // Turn 1 streams to the newly created conversation 7; the queued item
     // is handed back at run end and must land in the SAME conversation.
@@ -119,9 +120,9 @@ describe('end-of-run queue drain targets the conversation that ran (#460)', () =
 
   it('the drain resolves the workspace from the conversation row, not the active workspace', async () => {
     render(<ChatPanel />)
-    const textarea = await screen.findByLabelText('Message the agent')
-    fireEvent.change(textarea, { target: { value: 'first' } })
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    const box = await screen.findByLabelText('Message the agent')
+    await typeIntoComposer(box, 'first')
+    fireEvent.keyDown(box, { key: 'Enter' })
     await waitFor(() => expect(streamCalls.length).toBe(2))
     // convWorkspaceCache holds C:/w/a for conversation 7 while the store's
     // active workspace sat elsewhere (untouched default here) — the drained
@@ -136,9 +137,9 @@ describe('end-of-run queue drain targets the conversation that ran (#460)', () =
     // active workspace while the fetch is in flight.
     convWorkspaceCache.clear()
     render(<ChatPanel />)
-    const textarea = await screen.findByLabelText('Message the agent')
-    fireEvent.change(textarea, { target: { value: 'first' } })
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    const box = await screen.findByLabelText('Message the agent')
+    await typeIntoComposer(box, 'first')
+    fireEvent.keyDown(box, { key: 'Enter' })
     await waitFor(() => expect(streamCalls.length).toBe(2))
     expect(streamCalls[1].cid).toBe(7)
     expect(streamCalls[1].workspace).toBe('C:/w/a')
@@ -155,9 +156,9 @@ describe('end-of-run queue drain targets the conversation that ran (#460)', () =
     // the drain's own call must be the stalled one regardless of ordering.
     vi.mocked(getConversation).mockImplementation(() => new Promise(() => {}))
     render(<ChatPanel />)
-    const textarea = await screen.findByLabelText('Message the agent')
-    fireEvent.change(textarea, { target: { value: 'first' } })
-    fireEvent.keyDown(textarea, { key: 'Enter' })
+    const box = await screen.findByLabelText('Message the agent')
+    await typeIntoComposer(box, 'first')
+    fireEvent.keyDown(box, { key: 'Enter' })
     await waitFor(() => expect(streamCalls.length).toBe(2), { timeout: 8000 })
     expect(streamCalls[1].cid).toBe(7)
     expect(streamCalls[1].workspace).toBe('')

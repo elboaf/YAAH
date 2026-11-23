@@ -17,6 +17,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { render, fireEvent, waitFor } from '@testing-library/react'
 import { useAgent } from './store'
 import { Composer, ChatPanel } from './components'
+import { typeIntoComposer } from './composer/testUtils'
 
 const { getConfig, createConversation, listConversations, getMessages, getAgentTape } =
   vi.hoisted(() => ({
@@ -65,7 +66,10 @@ let pendingContext: Array<{
 }> = []
 
 function screen_textarea(): HTMLElement {
-  return document.querySelector('textarea') as unknown as HTMLElement
+  // The composer renders a Lexical contentEditable div ([role="textbox"]),
+  // not a <textarea>. The fallback <textarea> only shows before the editor
+  // mounts, so querySelector('textarea') would return null once mounted.
+  return document.querySelector('[role="textbox"]') as unknown as HTMLElement
 }
 
 describe('#1245 context refresh is generation-fenced', () => {
@@ -123,7 +127,7 @@ describe('#1245 context refresh is generation-fenced', () => {
       '{"type":"done"}\n'
     render(<Composer />)
     const box = screen_textarea()
-    fireEvent.change(box, { target: { value: 'first' } })
+    await typeIntoComposer(box, 'first')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     await waitFor(() => {
@@ -139,7 +143,7 @@ describe('#1245 context refresh is generation-fenced', () => {
     currentScript =
       '{"type":"usage","usage_tokens":2000,"model":"m","cost_spent":0.60}\n' +
       '{"type":"done"}\n'
-    fireEvent.change(box, { target: { value: 'second' } })
+    await typeIntoComposer(box, 'second')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     await waitFor(() => {
@@ -185,7 +189,7 @@ describe('#1245 context refresh is generation-fenced', () => {
       '{"type":"usage","usage_tokens":2000,"model":"m","cost_spent":0.60}\n' +
       '{"type":"done"}\n'
     const box = screen_textarea()
-    fireEvent.change(box, { target: { value: 'hello' } })
+    await typeIntoComposer(box, 'hello')
     fireEvent.keyDown(box, { key: 'Enter' })
     await waitFor(() => {
       expect(useAgent.getState().contextByConv['42']?.cost).toBeCloseTo(0.6)

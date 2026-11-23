@@ -14,6 +14,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, fireEvent, screen, waitFor } from '@testing-library/react'
 import { useAgent } from './store'
 import { Composer } from './components'
+import { typeIntoComposer } from './composer/testUtils'
 
 const { streamAgentTurn, getConfig, createConversation } = vi.hoisted(() => ({
   streamAgentTurn: vi.fn(),
@@ -53,8 +54,8 @@ describe('say wire contract (#226)', () => {
     )
     render(<Composer />)
 
-    const box = screen.getByLabelText('Message the agent') as HTMLTextAreaElement
-    fireEvent.change(box, { target: { value: 'do the thing' } })
+    const box = screen.getByLabelText('Message the agent') as HTMLDivElement
+    await typeIntoComposer(box, 'do the thing')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     // The draft is adopted as conversation 42 before the stream starts; the

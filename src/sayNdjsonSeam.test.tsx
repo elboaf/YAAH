@@ -10,6 +10,7 @@ import { render, fireEvent, waitFor } from '@testing-library/react'
 import { useAgent } from './store'
 import { Composer } from './components'
 import { streamAgentTurn } from './api'
+import { typeIntoComposer } from './composer/testUtils'
 
 const { getConfig, createConversation, listConversations, getMessages, getAgentTape } =
   vi.hoisted(() => ({
@@ -77,7 +78,7 @@ describe('NDJSON → AgentEvent seam (#230)', () => {
     render(<Composer />)
 
     const box = screen_textarea()
-    fireEvent.change(box, { target: { value: 'do the thing' } })
+    await typeIntoComposer(box, 'do the thing')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     await waitFor(() => {
@@ -115,7 +116,7 @@ describe('NDJSON → AgentEvent seam (#230)', () => {
       '{"type":"done"}\n'
     render(<Composer />)
     const box = screen_textarea()
-    fireEvent.change(box, { target: { value: 'go' } })
+    await typeIntoComposer(box, 'go')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     await waitFor(() => {
@@ -132,7 +133,7 @@ describe('NDJSON → AgentEvent seam (#230)', () => {
       'xt","text":"chunked"}\n{"type":"say","text":"split line say"}\n{"type":"done"}\n'
     render(<Composer />)
     const box = screen_textarea()
-    fireEvent.change(box, { target: { value: 'go' } })
+    await typeIntoComposer(box, 'go')
     fireEvent.keyDown(box, { key: 'Enter' })
 
     await waitFor(() => {
@@ -145,5 +146,7 @@ describe('NDJSON → AgentEvent seam (#230)', () => {
 })
 
 function screen_textarea(): HTMLElement {
-  return document.querySelector('textarea') as unknown as HTMLElement
+  // The composer renders a Lexical contentEditable div ([role="textbox"]),
+  // not a <textarea>. querySelector('textarea') returns null once mounted.
+  return document.querySelector('[role="textbox"]') as unknown as HTMLElement
 }
