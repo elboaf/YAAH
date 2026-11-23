@@ -372,26 +372,29 @@ def index_for_prompt(workspace: str | None) -> str:
         pinned, rest = [], lines
     ordered = pinned + rest
     body = "\n".join(ordered)
-    if len(body) > MAX_INDEX_CHARS:
-        # The marker and the surrounding wrapper (heading + usage footer)
-        # are appended *after* trimming, so reserve their length up front:
-        # the whole rendered block must stay near MAX_INDEX_CHARS, not just
-        # the body. The old logic capped only `pinned + rest`, so the
-        # appended marker + wrapper pushed the final block past the cap
-        # (PR #818 CI: test_index_for_prompt_caps_long_index read 14047).
-        marker = (
-            "\n…[truncated] — older entries were trimmed from this "
-            "index but still exist on disk; use memory_search to find "
-            "them by topic, then memory_read the slug."
-        )
-        wrapper = (
-            "# Persistent memory (yours — for THIS project)\n\n"
-            "Durable facts you have saved about this user and project; each "
-            "line links a file you can read with the memory_read tool:\n\n"
-            "\nMaintain this memory with the memory_save, memory_read, "
-            "memory_delete tools.\n\n"
-            f"{_WHEN_TO_SAVE}\n\n{_CONSULT_MEMORY}"
-        )
+    # The marker and the surrounding wrapper (heading + usage footer) are
+    # appended *after* trimming, so the decision to trim must be based on
+    # the whole rendered block, not just the body. Compute the wrapper and
+    # marker lengths up front and compare `wrapper + body` against the cap.
+    # The old logic compared only `len(body)`, so an index whose body fit
+    # but whose rendered block (body + wrapper) exceeded the limit was left
+    # untrimmed and ran past MAX_INDEX_CHARS (PR #818).
+    wrapper = (
+        "# Persistent memory (yours — for THIS project)\n\n"
+        "Durable facts you have saved about this user and project; each "
+        "line links a file you can read with the memory_read tool:\n\n"
+        "\nMaintain this memory with the memory_save, memory_read, "
+        "memory_delete tools.\n\n"
+        f"{_WHEN_TO_SAVE}\n\n{_CONSULT_MEMORY}"
+    )
+    marker = (
+        "\n…[truncated] — older entries were trimmed from this "
+        "index but still exist on disk; use memory_search to find "
+        "them by topic, then memory_read the slug."
+    )
+    if len(wrapper) + len(body) > MAX_INDEX_CHARS:
+        # Reserve space for the wrapper and marker so the final block stays
+        # near MAX_INDEX_CHARS, not just the body.
         budget = MAX_INDEX_CHARS - len(wrapper) - len(marker)
         # Drop oldest-first from `rest` until it fits; pinned types survive.
         while rest and len("\n".join(pinned + rest)) > budget:
