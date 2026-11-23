@@ -1134,16 +1134,21 @@ def invoked_skills_wrapper(block: str) -> str:
     )
 
 
-def _apply_injected_skills(
-    item: dict, loaded_skills: list[str], messages: list,
-    static_mode: bool = False,
+async def _apply_injected_skills(
+    item: dict, conversation_id: int, loaded_skills: list[str],
+    messages: list, static_mode: bool = False, workspace: str = "",
 ) -> list[dict]:
     """Add explicitly selected queued-message skills to the active run.
     Returns skill_not_found event dicts the caller must yield (#193: the
     queued/steer path surfaces unknown skill names to the user exactly like
-    the turn path, instead of silently injecting a "# Skill not found"
-    heading into model context). static_mode=True rides a tail user message
-    after the head instead of mutating it (frozen-head byte-stability)."""
+    the turn path).
+
+    In static mode, merges the skill block onto the persisted_skill_tail and
+    persists it to the conversation row (same as _load_skill). This keeps
+    invoked skills in the conversation across turns and maintains strict
+    prefix cache compatibility - the block is replayed at the tail slot on
+    every subsequent turn, so the prefix never shifts.
+    """
     names = [
         name
         for name in item.get("skills", [])
@@ -1155,20 +1160,49 @@ def _apply_injected_skills(
     known, unknown = skill_registry.split_known_unknown(names)
     events = [{"type": "skill_not_found", "skills": unknown}] if unknown else []
     block = skill_registry.bodies_for_prompt(known)
-    if block and messages and messages[0].get("role") == "system":
-        # Static mode: ride a tail user message right after the head instead
-        # of mutating the head (byte-stability) — and user, not system,
-        # because strict templates reject any system message after the first
-        # ("System message must be at the beginning" 500).
-        if static_mode:
+    if not block:
+        return events
+
+    if static_mode:
+        # Static mode: merge onto the persisted skill tail and persist
+        # to the conversation row (same approach as _load_skill).
+        # This prevents the whole history from re-prefilling on the
+        # next turn when the this-turn-only block is removed.
+        try:
+            # Re-read past turn-start snapshots: sibling load_skill calls
+            # in the same turn may have already written their blocks.
+            row = await get_conversation(conversation_id) or {}
+            prev_valid = _skill_tail_ws_valid(row, workspace)
+            prev = str(row.get("persisted_skill_tail") or "") if prev_valid else ""
+            merged = (
+                f"{prev}{skill_registry.SEPARATOR}{block}" if prev else block
+            )
+            await update_conversation(
+                conversation_id,
+                touch_updated_at=False,
+                persisted_skill_tail=merged,
+                persisted_skill_tail_ws=workspace or "",
+            )
+            # Insert at the skill_tail_index slot (replays the persisted tail)
+            tail_slot = skill_registry.skill_tail_index(messages)
+            if tail_slot is None:
+                tail_slot = 1
+            messages.insert(
+                tail_slot,
+                {"role": "user", "content": merged},
+            )
+        except Exception as e:  # noqa: BLE001 - cache best-effort
+            log.warning("persisted_skill_tail_write_failed: %s", e)
+            # Fallback: this-turn-only insert at slot 1
             messages.insert(1, {"role": "user", "content": invoked_skills_wrapper(block)})
-        else:
+    else:
+        # Non-static mode: append to system prompt (existing behavior)
+        if messages and messages[0].get("role") == "system":
             messages[0]["content"] = (
                 f"{messages[0]['content']}\n\n---\n\n"
                 f"{invoked_skills_wrapper(block)}"
             )
     return events
-
 
 # ---- access-mode gate (PLAN-access-modes.md) -------------------------------
 
