@@ -1185,12 +1185,15 @@ async def _apply_injected_skills(
             )
             # Insert at the skill_tail_index slot (replays the persisted tail)
             tail_slot = skill_registry.skill_tail_index(messages)
-            if tail_slot is None:
+            if tail_slot is not None:
+                # Replace existing tail content to avoid duplication during current turn
+                messages[tail_slot]["content"] = merged
+            else:
                 tail_slot = 1
-            messages.insert(
-                tail_slot,
-                {"role": "user", "content": merged},
-            )
+                messages.insert(
+                    tail_slot,
+                    {"role": "user", "content": merged},
+                )
         except Exception as e:  # noqa: BLE001 - cache best-effort
             log.warning("persisted_skill_tail_write_failed: %s", e)
             # Fallback: this-turn-only insert at slot 1
@@ -2254,7 +2257,7 @@ async def _run_agent_claimed(
     _tail_names = [
         n.strip()
         for n in re.findall(
-            r"(?m)^# Loaded skill: (.+)$", persisted_skill_tail
+            r"(?m)^# Skill: (.+)$", persisted_skill_tail
         )
     ]
     loaded_skills.extend(n for n in _tail_names if n not in loaded_skills)
@@ -2813,8 +2816,8 @@ async def _run_agent_claimed(
                 yield _ndjson(
                     {"type": "user_injected", "text": inj["text"], "id": inj["id"], "images": inj.get("images", []), "attachments": inj.get("attachments", []), "skills": inj.get("skills", [])}
                 )
-                for ev in _apply_injected_skills(
-                    inj, loaded_skills, messages, static_mode=static_mode
+                for ev in await _apply_injected_skills(
+                    inj, conversation_id, loaded_skills, messages, static_mode=static_mode, workspace=workspace
                 ):
                     yield _ndjson(ev)
                 messages.append({"role": "user", "content": _parts_with_images(_reinline(inj), inj.get("images", []))})
@@ -3104,8 +3107,8 @@ async def _run_agent_claimed(
                             "skills": inj.get("skills", []),
                         }
                     )
-                    for ev in _apply_injected_skills(
-                        inj, loaded_skills, messages, static_mode=static_mode
+                    for ev in await _apply_injected_skills(
+                        inj, conversation_id, loaded_skills, messages, static_mode=static_mode, workspace=workspace
                     ):
                         yield _ndjson(ev)
                     messages.append(

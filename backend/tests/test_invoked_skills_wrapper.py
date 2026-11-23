@@ -42,12 +42,13 @@ def test_shared_wrapper_carries_full_contract():
 
 
 @pytest.mark.usefixtures("skills_dir")
-def test_queued_path_uses_shared_wrapper():
+@pytest.mark.asyncio
+async def test_queued_path_uses_shared_wrapper():
     """_apply_injected_skills must emit the full contract, including the
     never-deny clause and composer phrasing the queued variant dropped."""
     skill_registry.ensure_scanned()
     messages = [{"role": "system", "content": "base"}]
-    loop._apply_injected_skills({"skills": ["ask-matt"]}, [], messages)
+    await loop._apply_injected_skills({"skills": ["ask-matt"]}, 1, [], messages, static_mode=False)
     sys = messages[0]["content"]
     for phrase in CONTRACT_PHRASES:
         assert phrase in sys, f"queued-path wrapper contract missing: {phrase!r}"
