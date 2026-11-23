@@ -70,26 +70,35 @@ export function createComposerEditor(
 
 /** Serialize an editor state to the plain text YAAH sends: walk the node map
  *  in document order, concatenating TextNode `__text` and SkillChipNode
- *  `$<skillName>` tokens. */
+ *  `$<skillName>` tokens.
+ *
+ *  Lexical stores children as a singly linked list (`__first`/`__next`), not
+ *  an array, so we walk that list. The old `__children`-based walk matched an
+ *  array that never exists on the root and silently returned `''`. */
 export function serializeEditorState(editorState: EditorState): string {
   const nodeMap = editorState._nodeMap
   const root = nodeMap.get('root') as any
   if (!root) return ''
-  return serializeChildren(root.__children ?? [], nodeMap)
+  return serializeNode(root, nodeMap)
 }
 
-function serializeChildren(children: string[], nodeMap: Map<string, any>): string {
-  const parts: string[] = []
-  for (const key of children) {
-    const node = nodeMap.get(key)
-    if (!node) continue
-    if (node.__type === 'skillchip') {
-      parts.push(`$${node.skillName ?? ''}`)
-    } else if (node.__type === 'text') {
-      parts.push(node.__text ?? '')
-    } else if (node.__type === 'paragraph') {
-      parts.push(serializeChildren(node.__children ?? [], nodeMap))
-    }
+function serializeNode(node: any, nodeMap: Map<string, any>): string {
+  if (!node) return ''
+  // Atomic inline node: emit its literal token, do not recurse.
+  if (node.__type === 'skillchip') {
+    return `$${node.skillName ?? ''}`
   }
-  return parts.join('')
+  // Leaf text node.
+  if (node.__type === 'text') {
+    return node.__text ?? ''
+  }
+  // Container (paragraph, etc.): walk the linked list of children in order.
+  let out = ''
+  let cur = node.__first
+  while (cur) {
+    const child = nodeMap.get(cur)
+    out += serializeNode(child, nodeMap)
+    cur = child.__next
+  }
+  return out
 }

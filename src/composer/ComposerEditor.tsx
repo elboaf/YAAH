@@ -16,7 +16,7 @@ import { LexicalComposer } from '@lexical/react/LexicalComposer'
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode } from 'lexical'
+import { $getRoot, $createTextNode, type LexicalEditor } from 'lexical'
 import { createComposerEditor, composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
 
@@ -75,6 +75,19 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(
 
     const editor = editorRef.current
 
+    // Expose the editor on the contentEditable root so tests can drive it
+    // through its state API (editor.update + $createTextNode) instead of
+    // fireEvent.change, which throws on a contentEditable div.
+    const editorRootRef = useRef<HTMLDivElement>(null)
+    useEffect(() => {
+      const el = editorRootRef.current
+      if (el && editor) {
+        (el as unknown as { __editor?: LexicalEditor }).__editor = editor
+      } else if (el && !editor) {
+        delete (el as unknown as { __editor?: LexicalEditor }).__editor
+      }
+    }, [editor])
+
     if (!editor) {
       // Render a fallback textarea until the editor mounts.
       return (
@@ -117,6 +130,7 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(
               }}
             >
               <ContentEditable
+                ref={editorRootRef}
                 role="textbox"
                 aria-label="Message the agent"
                 onChange={(e) => {
