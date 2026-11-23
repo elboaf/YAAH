@@ -1,6 +1,6 @@
 # YAAH
 
-![YAAH box art - the AI coding agent for everyone - Halloween edition](docs/assets/box-art-halloween.png)
+![YAAH box art - the AI coding agent for everyone - Christmas edition](docs/assets/box-art-christmas.png)
 
 **YAAH** = **Y**et **A**nother **A**gent **H**arness.
 
