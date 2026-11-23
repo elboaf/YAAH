@@ -12872,7 +12872,7 @@ export function Composer({
           ref={textareaRef}
           className="block w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 focus:outline-none"
           rows={2}
-          style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem' }}
+          style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem', boxSizing: 'border-box' }}
           placeholder={
             voiceState === 'recording'
               ? pttHeldRef.current
