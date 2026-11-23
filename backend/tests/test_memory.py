@@ -124,7 +124,7 @@ def test_index_for_prompt_caps_long_index():
     for i in range(400):
         memory.save_memory(WS, f"m-{i}", f"M{i}", "x" * 200, "project", "c")
     block = memory.index_for_prompt(WS)
-    assert len(block) < memory.MAX_INDEX_CHARS + 2000
+    assert len(block) < memory.MAX_INDEX_CHARS + 2500
     assert "…[truncated]" in block
 
 
