@@ -1,7 +1,7 @@
 """Provider presets and model discovery for OpenAI-compatible servers.
 
-Covers local stacks (Ollama, LM Studio, llama.cpp server) and hosted
-providers (OpenAI, OpenRouter). All speak the OpenAI /v1 protocol.
+Covers local stacks (Ollama, LM Studio, llama.cpp server, ninfer) and
+hosted providers (OpenAI, OpenRouter). All speak the OpenAI /v1 protocol.
 """
 import httpx
 
@@ -25,6 +25,20 @@ PRESETS = {
         "needs_api_key": False,
         # llama.cpp server tool support depends on build/flags; probe it
         "supports_tools": None,
+    },
+    "ninfer": {
+        "api_base": "http://localhost:8084/v1",
+        "model": "local-model",
+        "needs_api_key": False,
+        # Like llama.cpp: tool support depends on engine flags; probe it.
+        "supports_tools": None,
+        # #799: the engine resolves omitted sampling fields to the
+        # model-registered defaults and its answer (post-thinking) phase
+        # then inherits the thinking-phase sampler. The cooled default is
+        # visible here so preset-born blocks carry it; the runtime default
+        # (model_client.NINFER_DEFAULT_POST_THINKING) backstops blocks
+        # without the key either way.
+        "post_thinking": {"temperature": 0.2},
     },
     "openai": {
         "api_base": "https://api.openai.com/v1",
