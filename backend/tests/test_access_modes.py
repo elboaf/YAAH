@@ -120,6 +120,29 @@ async def test_gate_cancel_unblocks_with_error(tmp_path):
     assert result is not None and "error" in result
 
 
+@pytest.mark.asyncio
+async def test_gate_stream_teardown_releases_claim(tmp_path):
+    """Issue #811: when the stream dies while parked on the approval gate
+    (task cancelled, cancel_ev NOT set), the gate must propagate the
+    cancellation so the generator's finally releases the run claim. The
+    chat should not wedge as a zombie that holds the claim forever."""
+    cancel = asyncio.Event()
+    task = asyncio.create_task(
+        loop.run_gate("bash", {"command": "echo hi"}, "c1", 1, cancel, mode="ask")
+    )
+    # Wait for the gate to park.
+    for _ in range(200):
+        if "1:c1" in loop._pending_answers:
+            break
+        await asyncio.sleep(0.01)
+    # Simulate stream death: cancel the task WITHOUT setting cancel_ev.
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # The pending answer registry must have been cleaned up.
+    assert "1:c1" not in loop._pending_answers
+
+
 # ---------------------------------------------------------------- loop e2e
 
 
