@@ -2257,7 +2257,7 @@ async def _run_agent_claimed(
     _tail_names = [
         n.strip()
         for n in re.findall(
-            r"(?m)^# Skill: (.+)$", persisted_skill_tail
+            r"(?m)^(?:# Loaded skill|# Skill): (.+)$", persisted_skill_tail
         )
     ]
     loaded_skills.extend(n for n in _tail_names if n not in loaded_skills)
