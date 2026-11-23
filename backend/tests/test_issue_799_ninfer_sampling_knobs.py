@@ -8,6 +8,11 @@ block may therefore set a block-level ``temperature`` (number) and/or a
 provider's calls and keeps today's documented no-send behavior everywhere
 else. Knobs are read only from the resolved call's provider block — never
 from top-level config (legacy values stay ignored, #411).
+
+Ruling 2026-11-23 (owner, after rc.22 shipped): the cooled post-thinking
+default rides THE BUILD — a bare ninfer block on a fresh machine must not
+inherit the thinking-phase sampler. NINFER_DEFAULT_POST_THINKING applies
+unless the block sets post_thinking itself; an explicit JSON null opts out.
 """
 from backend.agent.model_client import _build_payload
 
@@ -60,11 +65,31 @@ def test_inactive_blocks_do_not_leak_into_the_payload():
     assert "temperature" not in _build_payload(cfg, None, False)
 
 
-def test_default_providers_send_nothing():
-    cfg = _cfg(providers={"ninfer": {"api_base": "http://x", "model": "m"}})
+def test_non_ninfer_bare_blocks_still_send_nothing():
+    cfg = _cfg(providers={"somelocal": {"api_base": "http://x", "model": "m"}})
+    cfg["active_provider"] = "somelocal"
     payload = _build_payload(cfg, None, False)
     assert "temperature" not in payload
     assert "post_thinking" not in payload
+
+
+def test_bare_ninfer_block_gets_the_shipped_cooled_default():
+    # The build carries the cooled sampler: a fresh machine's bare ninfer
+    # block must not send the answer phase into the thinking sampler.
+    cfg = _cfg(providers={"ninfer": {"api_base": "http://x", "model": "m"}})
+    payload = _build_payload(cfg, None, False)
+    assert payload["post_thinking"] == {"temperature": 0.2}
+    assert "temperature" not in payload  # no shipped top-level temp default
+    assert _build_payload(cfg, None, True)["post_thinking"] == {"temperature": 0.2}
+
+
+def test_explicit_ninfer_null_disables_the_default():
+    cfg = _cfg(
+        providers={
+            "ninfer": {"api_base": "http://x", "model": "m", "post_thinking": None}
+        }
+    )
+    assert "post_thinking" not in _build_payload(cfg, None, False)
 
 
 def test_top_level_knobs_stay_ignored():

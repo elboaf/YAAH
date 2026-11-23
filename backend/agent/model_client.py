@@ -187,6 +187,15 @@ def strip_image_parts(messages: list) -> tuple[list, int]:
 # retries, the server gets a new prompt mid-prefill and never converges.
 # 3600 s reads are still bounded so a dead socket eventually surfaces;
 # connect/write/pool stay tight.
+# #799: the ninfer engine resolves omitted sampling fields to the
+# model-registered defaults, and its answer (post-thinking) phase then
+# inherits the thinking-phase sampler (temp 1.0 on the resident Qwen3.5
+# artifact) unless the request carries post_thinking. The cooled default
+# ships IN CODE so every machine gets it, not just machines whose local
+# config.json carries the #799 snippet. A provider block's explicit value
+# still wins; an explicit JSON null turns the default off.
+NINFER_DEFAULT_POST_THINKING = {"temperature": 0.2}
+
 CHAT_CONNECT_TIMEOUT = 10
 CHAT_READ_TIMEOUT = 3600
 CHAT_WRITE_TIMEOUT = 60
@@ -235,12 +244,14 @@ def _build_payload(
     unit-testable without HTTP.
 
     Generation knobs stay with the provider unless a provider block opts in:
-    temperature/post_thinking ride only when the RESOLVED call's provider
-    block sets them (issue #799 — ninfer resolves omitted fields to the
+    temperature/post_thinking ride when the RESOLVED call's provider block
+    sets them (issue #799 — ninfer resolves omitted fields to the
     model-registered sampler, and its answer phase otherwise inherits the
-    thinking-phase one); everything else keeps the documented no-send
-    behavior and max_tokens rides only when a caller explicitly caps the
-    call (slotcache aux prefill).
+    thinking-phase one). Ninfer blocks additionally get the shipped cooled
+    default (NINFER_DEFAULT_POST_THINKING) so the fix rides the build to
+    every machine; explicit block values win, explicit null opts out.
+    Everything else keeps the documented no-send behavior and max_tokens
+    rides only when a caller explicitly caps the call (slotcache aux prefill).
     """
     payload = {
         "model": cfg["model"],
@@ -249,14 +260,23 @@ def _build_payload(
     }
     # #799: knobs come from the resolved call's provider block, so a
     # per-chat provider::model override applies that provider's values.
-    # Top-level config stays ignored (#411); a block without the keys
-    # sends nothing, exactly as before.
+    # Top-level config stays ignored (#411). Ninfer blocks additionally
+    # get the shipped cooled default unless the block sets post_thinking
+    # itself (dict = verbatim override; explicit null = off) — the
+    # default exists so the sampler fix rides the build to every
+    # machine, not only ones with a hand-edited config.json.
     block = (cfg.get("providers") or {}).get(cfg.get("active_provider") or "")
     if block:
         if block.get("temperature") is not None:
             payload["temperature"] = block["temperature"]
-        if isinstance(block.get("post_thinking"), dict):
-            payload["post_thinking"] = dict(block["post_thinking"])
+        pt = block.get("post_thinking")
+        if isinstance(pt, dict):
+            payload["post_thinking"] = dict(pt)
+        elif (
+            "post_thinking" not in block  # explicit null = off (get() can't tell)
+            and "ninfer" in (cfg.get("active_provider") or "")
+        ):
+            payload["post_thinking"] = dict(NINFER_DEFAULT_POST_THINKING)
     # Reasoning effort is set per chat (or inherited from the new-chat
     # default in the sidebar); blank means use the provider default.
     effort = (cfg.get("reasoning_effort") or "").strip().lower()
