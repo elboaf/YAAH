@@ -12789,6 +12789,7 @@ export function Composer({
           ref={composerRef}
           value={input}
           onChange={setInput}
+          knownSkills={knownSkillNamesSet}
           placeholder={
             voiceState === 'recording'
               ? pttHeldRef.current

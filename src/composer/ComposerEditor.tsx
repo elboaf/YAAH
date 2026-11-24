@@ -16,9 +16,11 @@ import { LexicalComposer } from '@lexical/react/LexicalComposer'
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, type LexicalEditor } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, type LexicalEditor } from 'lexical'
 import { createComposerEditor, composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
+import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
+import { SKILL_TOKEN_RE } from '../skillTokens'
 
 export interface ComposerHandle {
   focus: () => void
@@ -32,10 +34,12 @@ export interface ComposerEditorProps {
   onPasteFiles?: (files: FileList | File[]) => void
   onKeyDown?: (e: React.KeyboardEvent<HTMLDivElement>) => void
   className?: string
+  /** Set of known skill names; `$name` tokens matching this set become chips. */
+  knownSkills?: Set<string>
 }
 
 export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(
-  ({ value, onChange, placeholder, disabled, onPasteFiles, onKeyDown, className }, ref) => {
+  ({ value, onChange, placeholder, disabled, onPasteFiles, onKeyDown, className, knownSkills }, ref) => {
     // Stable editor instance across renders. Created synchronously (outside
     // useEffect) so the Lexical editor renders on the first paint — the
     // fallback textarea only shows before the first render.
@@ -50,7 +54,9 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(
     }
 
     // Push `value` into the editor whenever the parent changes it (dictation,
-    // draft restore, skill pick, programmatic clear). Guard the loop.
+    // draft restore, skill pick, programmatic clear). Parse `$name` tokens
+    // matching known skills into SkillChipNodes. Wrap content in a paragraph
+    // — Lexical's root accepts element nodes, not bare text.
     useEffect(() => {
       const editor = editorRef.current
       if (!editor) return
@@ -58,12 +64,31 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(
       editor.update(() => {
         const root = $getRoot()
         root.clear()
-        if (value) {
-          root.append($createTextNode(value))
+        if (!value) return
+        const paragraph = $createParagraphNode()
+        const matches = [...value.matchAll(SKILL_TOKEN_RE)]
+        let cursor = 0
+        for (const m of matches) {
+          const tokenStart = m.index ?? 0
+          const tokenText = m[0]
+          const skillName = m[1]
+          if (tokenStart > cursor) {
+            paragraph.append($createTextNode(value.slice(cursor, tokenStart)))
+          }
+          if (knownSkills?.has(skillName)) {
+            paragraph.append(new SkillChipNode(skillName))
+          } else {
+            paragraph.append($createTextNode(tokenText))
+          }
+          cursor = (m.index ?? 0) + tokenText.length
         }
+        if (cursor < value.length) {
+          paragraph.append($createTextNode(value.slice(cursor)))
+        }
+        root.append(paragraph)
       })
       syncingRef.current = false
-    }, [value, editorRef])
+    }, [value, editorRef, knownSkills])
 
     useImperativeHandle(
       ref,
@@ -106,6 +131,7 @@ export const ComposerEditor = forwardRef<ComposerHandle, ComposerEditorProps>(
         initialConfig={{
           namespace: 'YAAHComposer',
           theme: composerTheme,
+          nodes: [SkillChipNode],
           editable: true,
           onError: (error) => {
             // eslint-disable-next-line no-console
