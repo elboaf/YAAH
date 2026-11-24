@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, $setSelection, $createRangeSelection, $createPoint, COPY_COMMAND } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor, type PasteCommandType, $isNodeSelection, $isRangeSelection, $getSelection, $setSelection, $createRangeSelection, $createPoint, COPY_COMMAND } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -148,7 +148,7 @@ const ComposerInner = ({
   useEffect(() => {
     return editor.registerCommand(
       PASTE_COMMAND,
-      (event) => {
+      (event: PasteCommandType) => {
         if (!onPasteFiles) return false
         if (!(event instanceof ClipboardEvent)) {
           return false
