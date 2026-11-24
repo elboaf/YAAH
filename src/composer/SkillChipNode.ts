@@ -32,6 +32,25 @@ export class SkillChipNode extends ElementNode {
     return new SkillChipNode(node.skillName)
   }
 
+  override isInline(): boolean {
+    return true
+  }
+
+  override createDOM(): HTMLElement {
+    const span = document.createElement('span')
+    span.className = 'skill-chip'
+    span.textContent = `$${this.skillName}`
+    span.setAttribute('data-skill', this.skillName)
+    span.setAttribute('contenteditable', 'false')
+    return span
+  }
+
+  override updateDOM(): boolean {
+    // When skillName changes, the element must be recreated; the chip's
+    // serialized token and label both depend on the name.
+    return false
+  }
+
   override isEmpty(): boolean {
     return this.skillName.length === 0
   }
