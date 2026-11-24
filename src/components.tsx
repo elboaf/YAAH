@@ -97,7 +97,6 @@ import {
   commitRemoteDeviceSnapshot,
   syncPendingRemoteDeviceCommits,
   streamRemoteTurn,
-  cancelRemoteDeviceTurn,
   getSandboxStatus,
   type SandboxStatus,
   listProcesses,
@@ -123,14 +122,13 @@ import {
   type ModelServerModel,
   getInterceptorStatus,
   installInterceptor,
-  deleteInterceptorLinks,
   type InterceptorStatus,
   type InterceptorInstallResult,
 } from './api'
 import { isWindowsPlatform } from './update'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
-import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, TOOL_OUTPUT_CAP, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type SubAgentToolCall, type AgentStatus } from './store'
+import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -144,7 +142,7 @@ import { emissionSegments, isInlineImageAnchor } from './emissionSegments'
 import { VoiceRecorder } from './voice'
 import { useStickToBottom } from './useStickToBottom'
 import { classifyDrop } from './dropFiles'
-import { parseModelScope, qualifyModelScope } from './modelScope'
+import { parseModelScope } from './modelScope'
 import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { INLINE_LIMIT_BYTES, type Attachment } from './attachments'
@@ -271,6 +269,7 @@ export function matchOptionLabel(
   const langOf = (s: string) => {
     const letters = s.match(/\p{L}/gu) ?? []
     if (letters.length === 0) return null
+    // eslint-disable-next-line no-control-regex -- deliberately coarse latin bucket; control chars in real prose are noise either way.
     const latin = letters.filter((ch) => /[\u0000-\u024F\u1E00-\u1EFF]/u.test(ch)).length
     return latin / letters.length >= 0.6 ? 'latin' : 'other'
   }
@@ -1828,9 +1827,6 @@ function planHeader(open: boolean, status: string) {
  *  Open by default, collapsible; works live and after reload. */
 function QuestionAnchor({ tc, after }: { tc: ToolCall; after: ToolCall[] }) {
   const [open, setOpen] = useState(true)
-  const result = (tc.result ?? {}) as { answer?: string | null }
-  const answer =
-    typeof result.answer === 'string' && result.answer ? result.answer : null
   return (
     <div className="lg-card mb-2">
       <button
@@ -3763,7 +3759,7 @@ export function ConversationList({
           onCancel={() => setRemoveWsTarget(null)}
           onConfirm={() => {
             deleteWorkspace(removeWsTarget.id, removeWsTarget.owner_id ?? undefined)
-              .then((r) => {
+              .then(() => {
                 // If the open conversation was relocated, follow it to Default.
                 const moved =
                   conversationId !== null &&
@@ -4130,7 +4126,7 @@ export function ModelOptions({
   byProvider: Record<string, ProviderModels>
   value: string
 }) {
-  const [provider, modelId] = value.split('::')
+  const [, modelId] = value.split('::')
   return (
     <>
       {Object.entries(byProvider).map(([name, pm]) => (
@@ -7891,7 +7887,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   const effectiveModel = effectiveRemoteModel(ttsDraft.model, remoteModelList)
   const [remoteProbing, setRemoteProbing] = useState(false)
   // Notification chimes (#29): mute toggle, default ON.
-  const [soundsEnabled, setSoundsUi] = useState(true)
+  const [, setSoundsUi] = useState(true)
   const [ttsModelReady, setTtsModelReady] = useState(false)
   const [ttsDownloading, setTtsDownloading] = useState(false)
   const [ttsDlPct, setTtsDlPct] = useState<number | null>(null)
@@ -7984,9 +7980,9 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                   [
                     m,
                     {
-                      ...(typeof (c as unknown as { model_steps?: Record<string, number> }).model_steps?.[m] === 'number'
-                        ? { steps: (c as unknown as { model_steps?: Record<string, number> }).model_steps![m] }
-                        : {}),
+                      steps: typeof (c as unknown as { model_steps?: Record<string, number> }).model_steps?.[m] === 'number'
+                        ? (c as unknown as { model_steps?: Record<string, number> }).model_steps![m]
+                        : undefined,
                     },
                   ] as const,
               ),
@@ -8527,7 +8523,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                                     // vanishes (absence is deletion).
                                     delete next[m]
                                   } else {
-                                    next[m] = { ...(next[m] ?? {}), steps: v }
+                                    next[m] = { ...next[m], steps: v }
                                   }
                                   return next
                                 }),
@@ -9766,7 +9762,6 @@ function DraftDestinationCard() {
   const workspace = useAgent((s) => s.workspace)
   const draftDestination = useAgent((s) => s.draftDestination)
   const pinDraftDestination = useAgent((s) => s.pinDraftDestination)
-  const setDraftScope = useAgent((s) => s.setDraftScope)
   const devices = useRemote((s) => s.devices)
   const [rows, setRows] = useState<WorkspaceRow[]>([])
   const [remoteAdd, setRemoteAdd] = useState(false)
@@ -10564,7 +10559,6 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   // assistant emission or a user row while the turn keeps running — keying
   // liveness on the absolute tail would flip the active ticker to a finished
   // TraceLine summary mid-run. Key it on the last ASSISTANT message instead.
-  const bufKey = useAgent.getState().bufferKey()
   const liveId = (() => {
     if (!(streaming || agentRunLive) || messages.length === 0) return null
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -10626,7 +10620,6 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   const ttsError = useTts((s) => s.error)
   const speakMessage = useTts((s) => s.speakMessage)
   const speakQuestion = useTts((s) => s.speakQuestion)
-  const ttsStop = useTts((s) => s.stop)
   const ttsSetEnabled = useTts((s) => s.setEnabled)
   const ttsSync = useTts((s) => s.syncFromServer)
   // Hydrate readiness + persisted enabled flag once at mount.
@@ -10851,7 +10844,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
                 <button
                   className="block w-full px-3 py-1 text-left text-zinc-300 hover:bg-zinc-800"
                   role="menuitem"
-                  onClick={(e) => {
+                  onClick={() => {
                     // Review: Copy writes the RAW selection (formatting kept);
                     // failure surfaces on the shared error-toast path.
                     navigator.clipboard.writeText(searchMenu.text).catch((error) => {
@@ -11069,7 +11062,6 @@ export function Composer({
     setStatus,
     setModelCall,
     setError,
-    setConversationId,
     adoptDraft,
     setPendingQuestion,
     setPendingApproval,
@@ -11106,11 +11098,9 @@ export function Composer({
   // Issue #7 queue: echoes of messages queued during this run (transcript
   // rows marked queued) + pill open state + steer-in-flight flag.
   const bufKeyForQueue = useAgent.getState().bufferKey()
-  const queueEchoes = useAgent((s) => s.queueEchoByConv[bufKeyForQueue])
   const setQueueEcho = useAgent((s) => s.setQueueEcho)
   const dropQueuedEcho = useAgent((s) => s.dropQueuedEcho)
   const markQueuedAsNormal = useAgent((s) => s.markQueuedAsNormal)
-  const steering = useAgent((s) => s.steerByConv[bufKeyForQueue] ?? false)
   const setSteerFlag = useAgent((s) => s.setSteer)
   const pendingQueueAutosendRef = useRef<Record<string, Array<{ id: number; text: string; skills?: string[]; images?: string[] }>>>({})
   // Re-read the context endpoint and apply it only if no newer update
@@ -11762,7 +11752,7 @@ export function Composer({
   // before writing final status — buffered text must never land after
   // 'idle'/'error', and a Stop must not orphan a scheduled rAF.
   const streamBufferFlushers = new Map<string, () => void>()
-  const handleStreamEvent = (bufKey: string, asstId: string, throwOnError?: boolean) => {
+  const handleStreamEvent = (bufKey: string, asstId: string, _throwOnError?: boolean) => {
     let curId = asstId
     let awaitingPostSteerEmission = false
     // True while text is allowed to flow without an emission separator: the

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, waitFor } from '@testing-library/react'
 
 const { listLocalWorkspaces, listWorkspaces } = vi.hoisted(() => ({
   listLocalWorkspaces: vi.fn(),

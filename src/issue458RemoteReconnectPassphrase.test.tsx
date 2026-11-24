@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 // #458 — remote devices reconnect without re-entering passphrase
 // Tests the reconnect flow: Connect button sends empty passphrase, backend

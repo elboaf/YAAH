@@ -1,7 +1,7 @@
 {
   "name": "ai-coding-agent",
   "private": true,
-  "version": "1.0.20-rc.31",
+  "version": "1.0.20-rc.32",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:frontend\" \"npm:dev:backend\"",
@@ -42,6 +42,7 @@
     "autoprefixer": "^10.6.2",
     "concurrently": "^10.0.7",
     "jsdom": "31.0.1",
+    "oxlint": "^1.95.0",
     "postcss": "^8.5.33",
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",

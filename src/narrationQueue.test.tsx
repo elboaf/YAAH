@@ -16,7 +16,7 @@
 // turn and pins: later emissions are synthesized, and fallback text plays.
 //
 // Run: npx vitest run src/narrationQueue.test.tsx
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, vi } from 'vitest'
 import { render, cleanup } from '@testing-library/react'
 
 const synthCalls: string[] = []

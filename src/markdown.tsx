@@ -14,7 +14,6 @@
 // preview opener) flow through MarkdownContext instead of closures.
 
 import {
-  Fragment,
   createContext,
   useContext,
   useLayoutEffect,
@@ -177,15 +176,6 @@ function toArray(children: ReactNode): ReactNode[] {
 }
 
 // --------------------------------------------------------------- streaming text
-
-/**
- * How much of this span's text the DOM already holds. The text node is
- * grown only by appendData / rewritten only by the non-append branch
- * below, so this count plus the node's own data decide append vs rewrite.
- */
-interface StreamState {
-  committed: number
-}
 
 /**
  * Append-only rendering for text that grows while it is on screen (#275).

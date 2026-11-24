@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { attachmentText, INLINE_LIMIT_BYTES, type Attachment } from './attachments'
+import { attachmentText, INLINE_LIMIT_BYTES } from './attachments'
 import { FIXTURE } from './attachmentFixture'
 import { parseLegacyAttachments } from './legacyAttachments'
 

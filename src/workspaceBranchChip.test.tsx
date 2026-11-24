@@ -27,7 +27,6 @@ vi.mock('./store', () => ({
 }))
 
 import { GitChipCluster } from './components'
-import type { GitInfo } from './api'
 import { baseGitInfo } from './gitInfoFixture'
 
 // #363: the branch chip is the ONE workspace tree's checked-out branch.

@@ -19,17 +19,6 @@ import { DraftDestinationCard } from './components'
 import { useAgent } from './store'
 import { useRemote } from './remoteStore'
 
-const workspaces = [
-  {
-    id: 1,
-    path: 'C:/repos/project',
-    label: 'project',
-    last_opened_at: null,
-    exists: true,
-    conversation_count: 0,
-  },
-]
-
 // The draft card's branch chip, restored after #361 dropped it with the
 // per-chat stored branch: the destination workspace's checked-out branch,
 // picking one checks the ONE workspace tree out (backend branch_select).

@@ -3,7 +3,7 @@
 // 1. Backdrop dismiss must use mouseup with press-origin check, not just mousedown.
 // 2. Workspace group drag must use pointer capture to survive cursor leaving header.
 import { useState, useRef } from 'react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
 afterEach(() => cleanup())

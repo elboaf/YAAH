@@ -39,13 +39,12 @@ DEFAULTS = {
     "reasoning_effort": "",
     # Agent loop tool-call rounds per turn (Settings -> General -> Max steps).
     "max_steps": 20,
-    # Pre-PR verification: run deterministic checks before push/PR
+    # Pre-PR verification: run deterministic checks before push/PR.
+    # No check list here — check selection is marker-gated per workspace
+    # in prepr.default_checks (a Python repo must not run npm eslint).
+    # Global/user config may still set explicit `checks` to override.
     "pre_pr": {
         "enabled": True,
-        "checks": [
-            {"name": "lint", "command": "npx eslint src/ --max-warnings 0"},
-            {"name": "typecheck", "command": "npx tsc --noEmit"},
-        ],
     },
     # Agent loop tool-call rounds per turn (Settings → General → Max steps).
     "max_steps": 200,

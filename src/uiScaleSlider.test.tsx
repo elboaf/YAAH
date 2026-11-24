@@ -2,7 +2,7 @@
 // slider. The card is exported for isolation (SaySettingsCard precedent);
 // the Settings modal embeds it and applies each change immediately as a
 // ui-scale-changed event (preview-while-sliding), persisting on Save.
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 
 import { InterfaceScaleCard } from './components'

@@ -3,7 +3,7 @@
 // dropdown/free-text dualities.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ttsVoices, ttsTest } from './api'
-import { RemoteVoiceField, RemoteModelField, effectiveRemoteModel } from './components'
+import { RemoteVoiceField, RemoteModelField } from './components'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import React from 'react'
 

@@ -23,7 +23,7 @@
 // tree with the reported TypeError.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, cleanup } from '@testing-library/react'
 import { buildMessages, useAgent } from './store'
 import { MessageView } from './components'
 import { normalizeAskOptions } from './askOptions'

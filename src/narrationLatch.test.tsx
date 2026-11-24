@@ -117,13 +117,11 @@ describe('narration latch per emission, remount-surviving (#237)', () => {
     useAgent.setState((s) => ({
       messagesByConv: {
         ...s.messagesByConv,
-        '9': [
-          ...(s.messagesByConv['9'] ?? []).map((m) =>
+        '9': (s.messagesByConv['9'] ?? []).map((m) =>
             m.id === 'a1'
               ? { ...m, content: 'Working. Done now. More work completed.', say: SAID_B }
               : m,
-          ),
-        ],
+        ),
       },
     }))
 
