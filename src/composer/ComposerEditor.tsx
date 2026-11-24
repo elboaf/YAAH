@@ -199,7 +199,7 @@ const ComposerInner = ({
     )
   }, [editor])
 
-  // Expose the editor on the contentEditable root for test access.
+  // Expose the editor on the contentEditable root for test access (CI trigger)
   useEffect(() => {
     const el = editorRootRef.current
     if (el) {
