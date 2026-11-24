@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, COPY_COMMAND } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, $isElementNode, $isTextNode, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, $setSelection, $createRangeSelection, $createPoint, COPY_COMMAND } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -75,33 +75,82 @@ const ComposerInner = ({
     // If the user typed `$skill` and it was already converted to a chip,
     // the serialized text will match `value` exactly — skip the rebuild.
     const current = serializeEditorState(editor.getEditorState())
-    if (current === value) return
+    // Serialized text is identical whether a `$name` token is a chip or a
+    // plain TextNode, so an exact string match does not prove the editor is
+    // in the desired state. Rebuild when the editor still holds a
+    // known-skill token as literal text (typed, or restored from a draft
+    // whose chips serialized back to `$name`). Without this, a token typed
+    // before skills load, or restored before skills load, never becomes a
+    // chip — it stays as spell-checked `$name` text.
+    const hasUnchippedToken = editor.getEditorState().read(() => {
+      const root = $getRoot()
+      let dirty = false
+      const children = root.getChildren()
+      children.forEach((node) => {
+        if ($isElementNode(node)) {
+          node.getChildren().forEach((child) => {
+            if ($isTextNode(child)) {
+              const text = child.getTextContent()
+              for (const m of text.matchAll(SKILL_TOKEN_RE)) {
+                if (knownSkills?.has(m[1])) {
+                  dirty = true
+                  return
+                }
+              }
+            }
+          })
+        }
+      })
+      return dirty
+    })
+    if (current === value && !hasUnchippedToken) return
     syncingRef.current = true
     editor.update(() => {
+      // Preserve the caret across the rebuild: `root.clear()` drops the
+      // paragraph that holds the insertion point, so the caret would jump to
+      // the start and later input would land after the wrong token. Record the
+      // offset before clearing and restore it after appending the new content.
+      const selection = $getSelection()
+      let caretOffset = 0
+      if ($isRangeSelection(selection) && selection.focus) {
+        caretOffset = selection.focus.offset
+      } else {
+        caretOffset = current.length
+      }
       const root = $getRoot()
       root.clear()
       if (!value) return
       const paragraph = $createParagraphNode()
       const matches = [...value.matchAll(SKILL_TOKEN_RE)]
-      let cursor = 0
+      let pos = 0
       for (const m of matches) {
         const tokenStart = m.index ?? 0
         const tokenText = m[0]
         const skillName = m[1]
-        if (tokenStart > cursor) {
-          paragraph.append($createTextNode(value.slice(cursor, tokenStart)))
+        if (tokenStart > pos) {
+          paragraph.append($createTextNode(value.slice(pos, tokenStart)))
         }
         if (knownSkills?.has(skillName)) {
           paragraph.append(new SkillChipNode(skillName))
         } else {
           paragraph.append($createTextNode(tokenText))
         }
-        cursor = (m.index ?? 0) + tokenText.length
+        pos = (m.index ?? 0) + tokenText.length
       }
-      if (cursor < value.length) {
-        paragraph.append($createTextNode(value.slice(cursor)))
+      if (pos < value.length) {
+        paragraph.append($createTextNode(value.slice(pos)))
       }
       root.append(paragraph)
+
+      // Restore the caret: the rebuilt content's first leaf is the new focus.
+      // Select it at the recorded offset so later input lands after the token.
+      const leaf = paragraph.getFirstChild()
+      if (leaf) {
+        const sel = $createRangeSelection()
+        sel.anchor = $createPoint(leaf.getKey(), caretOffset, 'text')
+        sel.focus = $createPoint(leaf.getKey(), caretOffset, 'text')
+        $setSelection(sel)
+      }
     })
     syncingRef.current = false
   }, [value, editor, knownSkills, syncingRef])
