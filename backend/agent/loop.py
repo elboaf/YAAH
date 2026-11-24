@@ -429,11 +429,17 @@ def _step_budget_message(max_steps: int) -> str:
     Providers (each model entry), and config.json `max_steps` (0 = unlimited).
     The old "Settings → General → Max steps" pointer named a tab/field that
     does not exist, so following it led nowhere (#838)."""
-    return (
-        f"Step budget ({max_steps}) exhausted — raise it in "
-        "Settings → Providers (per-model max steps), or config.json `max_steps` "
-        "(0 = unlimited)"
+    # Precedence (see _resolve_max_steps): a model-level or provider-level
+    # value wins over the global, so if the effective budget below is not
+    # DEFAULT_MAX_STEPS the global value is not what you want to touch.
+    note = (
+        f"Step budget ({max_steps}) exhausted — raise it. A per-model or "
+        "per-provider max steps value overrides the global, so if the "
+        "effective budget is not the default, change that override (Settings "
+        "→ Providers). Otherwise raise the global Settings → Providers "
+        "(per-model max steps) or config.json `max_steps` (0 = unlimited)."
     )
+    return note
 
 
 def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
