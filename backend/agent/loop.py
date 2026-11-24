@@ -453,6 +453,8 @@ def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
     unlimited and is honored, not skipped."""
     model = model_override or ""
     provider = model.partition("::")[0] if "::" in model else ""
+    if not model:
+        model = cfg.get("model") or ""
     if not provider:
         provider = cfg.get("active_provider") or ""
 
