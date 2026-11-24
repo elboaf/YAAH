@@ -146,7 +146,15 @@ const ComposerInner = ({
   useEffect(() => {
     return editor.registerCommand(
       COPY_COMMAND,
-      (event: ClipboardEvent | KeyboardEvent | null) => {
+      (event) => {
+        // Only handle real copy events with clipboard data; keyboard
+        // shortcuts (Ctrl+C) are also dispatched through COPY_COMMAND but
+        // without clipboardData, so we bail early.
+        if (!event || typeof event.preventDefault !== 'function') {
+          return false
+        }
+        const ce = event as ClipboardEvent
+        if (!ce.clipboardData) return false
         editor.update(() => {
           const selection = $getSelection()
           if (!$isRangeSelection(selection) && !$isNodeSelection(selection)) {
@@ -161,8 +169,8 @@ const ComposerInner = ({
               clipboardText += node.getTextContent()
             }
           }
-          event.preventDefault()
-          event.clipboardData?.setData('text/plain', clipboardText)
+          ce.preventDefault()
+          ce.clipboardData!.setData('text/plain', clipboardText)
         })
         return true
       },
