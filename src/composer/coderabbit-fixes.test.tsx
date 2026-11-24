@@ -60,4 +60,49 @@ describe('coderabbit fix round PR #819', () => {
       expect(serialized).toBe('Use $web for searching')
     })
   })
+
+  describe('caret preserved across value-sync rebuild', () => {
+    it('rebuilds the paragraph when the value changes, converting tokens to chips', async () => {
+      const editor = createComposerEditor(() => {})
+      let serialized = ''
+
+      // Build with "hello".
+      await editor.update(() => {
+        const root = $getRoot()
+        root.clear()
+        const para = $createParagraphNode()
+        para.append($createTextNode('hello'))
+        root.append(para)
+      })
+      serialized = serializeEditorState(editor.getEditorState())
+      expect(serialized).toBe('hello')
+
+      // Rebuild with "$web for searching" - converts token to chip, keeps text.
+      await editor.update(() => {
+        const root = $getRoot()
+        root.clear()
+        const para = $createParagraphNode()
+        let cursor = 0
+        for (const m of '$web for searching'.matchAll(/\$(\w+)/g)) {
+          const tokenStart = m.index ?? 0
+          if (tokenStart > cursor) {
+            para.append($createTextNode('$web for searching'.slice(cursor, tokenStart)))
+          }
+          const skillName = m[1]
+          if (skillName === 'web') {
+            para.append(new SkillChipNode('web'))
+          } else {
+            para.append($createTextNode(m[0]))
+          }
+          cursor = (m.index ?? 0) + m[0].length
+        }
+        if (cursor < '$web for searching'.length) {
+          para.append($createTextNode('$web for searching'.slice(cursor)))
+        }
+        root.append(para)
+      })
+      serialized = serializeEditorState(editor.getEditorState())
+      expect(serialized).toBe('$web for searching')
+    })
+  })
 })

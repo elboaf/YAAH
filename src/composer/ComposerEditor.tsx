@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, COPY_COMMAND } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, $setSelection, $createRangeSelection, $createPoint, COPY_COMMAND } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -78,30 +78,51 @@ const ComposerInner = ({
     if (current === value) return
     syncingRef.current = true
     editor.update(() => {
+      // Preserve the caret across the rebuild: `root.clear()` drops the
+      // paragraph that holds the insertion point, so the caret would jump to
+      // the start and later input would land after the wrong token. Record the
+      // offset before clearing and restore it after appending the new content.
+      const selection = $getSelection()
+      let caretOffset = 0
+      if ($isRangeSelection(selection) && selection.focus) {
+        caretOffset = selection.focus.offset
+      } else {
+        caretOffset = current.length
+      }
       const root = $getRoot()
       root.clear()
       if (!value) return
       const paragraph = $createParagraphNode()
       const matches = [...value.matchAll(SKILL_TOKEN_RE)]
-      let cursor = 0
+      let pos = 0
       for (const m of matches) {
         const tokenStart = m.index ?? 0
         const tokenText = m[0]
         const skillName = m[1]
-        if (tokenStart > cursor) {
-          paragraph.append($createTextNode(value.slice(cursor, tokenStart)))
+        if (tokenStart > pos) {
+          paragraph.append($createTextNode(value.slice(pos, tokenStart)))
         }
         if (knownSkills?.has(skillName)) {
           paragraph.append(new SkillChipNode(skillName))
         } else {
           paragraph.append($createTextNode(tokenText))
         }
-        cursor = (m.index ?? 0) + tokenText.length
+        pos = (m.index ?? 0) + tokenText.length
       }
-      if (cursor < value.length) {
-        paragraph.append($createTextNode(value.slice(cursor)))
+      if (pos < value.length) {
+        paragraph.append($createTextNode(value.slice(pos)))
       }
       root.append(paragraph)
+
+      // Restore the caret: the rebuilt content's first leaf is the new focus.
+      // Select it at the recorded offset so later input lands after the token.
+      const leaf = paragraph.getFirstChild()
+      if (leaf) {
+        const sel = $createRangeSelection()
+        sel.anchor = $createPoint(leaf.getKey(), caretOffset, 'text')
+        sel.focus = $createPoint(leaf.getKey(), caretOffset, 'text')
+        $setSelection(sel)
+      }
     })
     syncingRef.current = false
   }, [value, editor, knownSkills, syncingRef])
