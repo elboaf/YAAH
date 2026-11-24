@@ -8,8 +8,8 @@ const { streamAgentTurn, getConfig, createConversation } = vi.hoisted(() => ({
   getConfig: vi.fn(),
   createConversation: vi.fn(),
 }))
-vi.mock('./api', async (importOriginal) => ({
-  ...await importOriginal<typeof import('./api')>(),
+vi.mock('../api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api')>(),
   streamAgentTurn,
   getConfig,
   createConversation,
