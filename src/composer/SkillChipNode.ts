@@ -10,15 +10,15 @@
  * the serialized text, never separate state. Editing raw text re-derives
  * chips; a chip inserted re-derives the text.
  */
-import { ElementNode } from 'lexical'
+import { ElementNode, NodeKey } from 'lexical'
 
 export class SkillChipNode extends ElementNode {
   /** The invoked skill name. Public field so the serializer (which walks the
    *  raw node map) can read it as `node.skillName`. */
   skillName: string
 
-  constructor(skillName: string = '') {
-    super()
+  constructor(skillName: string = '', key?: NodeKey) {
+    super(key)
     this.skillName = skillName
   }
 
@@ -29,7 +29,7 @@ export class SkillChipNode extends ElementNode {
   }
 
   static clone(node: SkillChipNode): SkillChipNode {
-    return new SkillChipNode(node.skillName)
+    return new SkillChipNode(node.skillName, node.__key)
   }
 
   override isInline(): boolean {
