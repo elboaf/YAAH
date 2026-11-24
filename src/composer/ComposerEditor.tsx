@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, type LexicalEditor } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -106,6 +106,25 @@ const ComposerInner = ({
     })
   }, [editor, onChange, syncingRef])
 
+  // Paste files via PASTE_COMMAND. When clipboard has files and a callback
+  // is set, consume the command to prevent default paste; otherwise let
+  // normal paste continue.
+  useEffect(() => {
+    return editor.registerCommand(
+      PASTE_COMMAND,
+      (event) => {
+        if (!onPasteFiles) return false
+        const ce = event as ClipboardEvent
+        const files = ce.clipboardData?.files
+        if (!files?.length) return false
+        event.preventDefault()
+        onPasteFiles(files)
+        return true
+      },
+      0,
+    )
+  }, [editor, onPasteFiles])
+
   // Expose the editor on the contentEditable root for test access.
   useEffect(() => {
     const el = editorRootRef.current
@@ -129,13 +148,6 @@ const ComposerInner = ({
           aria-disabled={disabled}
           // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
           onKeyDown={(e) => onKeyDown?.(e)}
-          onPaste={(e) => {
-            const files = e.clipboardData?.files
-            if (files?.length && onPasteFiles) {
-              e.preventDefault()
-              onPasteFiles(files)
-            }
-          }}
         >
           <ContentEditable
             ref={editorRootRef}
