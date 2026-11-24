@@ -150,11 +150,10 @@ const ComposerInner = ({
       PASTE_COMMAND,
       (event) => {
         if (!onPasteFiles) return false
-        if (!event || typeof event.preventDefault !== 'function') {
+        if (!(event instanceof ClipboardEvent)) {
           return false
         }
-        const ce = event as ClipboardEvent
-        const files = ce.clipboardData?.files
+        const files = event.clipboardData?.files
         if (!files?.length) return false
         event.preventDefault()
         onPasteFiles(files)
@@ -174,11 +173,10 @@ const ComposerInner = ({
         // Only handle real copy events with clipboard data; keyboard
         // shortcuts (Ctrl+C) are also dispatched through COPY_COMMAND but
         // without clipboardData, so we bail early.
-        if (!event || typeof event.preventDefault !== 'function') {
+        if (!(event instanceof ClipboardEvent)) {
           return false
         }
-        const ce = event as ClipboardEvent
-        if (!ce.clipboardData) return false
+        if (!event.clipboardData) return false
         editor.update(() => {
           const selection = $getSelection()
           if (!$isRangeSelection(selection) && !$isNodeSelection(selection)) {
@@ -193,8 +191,7 @@ const ComposerInner = ({
               clipboardText += node.getTextContent()
             }
           }
-          ce.preventDefault()
-          ce.clipboardData!.setData('text/plain', clipboardText)
+          event.clipboardData!.setData('text/plain', clipboardText)
         })
         return true
       },
