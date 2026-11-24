@@ -6167,6 +6167,13 @@ export function AgentSayWatcher() {
  *  enable command and the BIOS virtualization hint. Toggling off only flips
  *  the config flag — it never disables the Windows feature destructively. */
 export function SandboxSettingsCard() {
+  // Windows-only capability (the disposable VM is a Windows fact; the
+  // backend sandbox module gates every path on os.name == "nt"). On other
+  // platforms the whole section does not exist — not even its status fetch.
+  // The guard sits BEFORE the hooks so a Linux/macOS mount never registers
+  // them (an effect after a null render would still run and poll).
+  if (!isWindowsPlatform()) return null
+
   const [enabled, setEnabled] = useState(true)
   const [status, setStatus] = useState<SandboxStatus | null>(null)
 
@@ -7072,6 +7079,13 @@ export function BrowserControlSettingsCard() {
  *  this card makes the OFF state visible but never changes it implicitly.
  *  Status refreshes on tab mount and after each action (no polling). */
 export function ModelServerSettingsCard({ task = 'embedding' }: { task?: string }) {
+  // Windows-only capability (the llama-server process is staged and launched
+  // only on Windows). On other platforms the whole section does not exist —
+  // not even its status fetch. The guard sits BEFORE the hooks so a
+  // Linux/macOS mount never registers them (an effect after a null render
+  // would still run and poll).
+  if (!isWindowsPlatform()) return null
+
   const isEmbedding = task === 'embedding'
   const [status, setStatus] = useState<ModelServerStatus | null>(null)
   const [statusFailed, setStatusFailed] = useState(false)
