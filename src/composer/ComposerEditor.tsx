@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, COPY_COMMAND } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, $isElementNode, $isTextNode, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, COPY_COMMAND } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -75,7 +75,35 @@ const ComposerInner = ({
     // If the user typed `$skill` and it was already converted to a chip,
     // the serialized text will match `value` exactly — skip the rebuild.
     const current = serializeEditorState(editor.getEditorState())
-    if (current === value) return
+    // Serialized text is identical whether a `$name` token is a chip or a
+    // plain TextNode, so an exact string match does not prove the editor is
+    // in the desired state. Rebuild when the editor still holds a
+    // known-skill token as literal text (typed, or restored from a draft
+    // whose chips serialized back to `$name`). Without this, a token typed
+    // before skills load, or restored before skills load, never becomes a
+    // chip — it stays as spell-checked `$name` text.
+    const hasUnchippedToken = editor.getEditorState().read(() => {
+      const root = $getRoot()
+      let dirty = false
+      const children = root.getChildren()
+      children.forEach((node) => {
+        if ($isElementNode(node)) {
+          node.getChildren().forEach((child) => {
+            if ($isTextNode(child)) {
+              const text = child.getTextContent()
+              for (const m of text.matchAll(SKILL_TOKEN_RE)) {
+                if (knownSkills?.has(m[1])) {
+                  dirty = true
+                  return
+                }
+              }
+            }
+          })
+        }
+      })
+      return dirty
+    })
+    if (current === value && !hasUnchippedToken) return
     syncingRef.current = true
     editor.update(() => {
       const root = $getRoot()
