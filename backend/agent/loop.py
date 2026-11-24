@@ -428,7 +428,11 @@ def _step_budget_message(max_steps: int) -> str:
     Names only surfaces that exist: the per-model max steps in Settings →
     Providers (each model entry), and config.json `max_steps` (0 = unlimited).
     The old "Settings → General → Max steps" pointer named a tab/field that
-    does not exist, so following it led nowhere (#838)."""
+    does not exist, so following it led nowhere (#838).
+
+    The body explains precedence (see _resolve_max_steps): a per-model or
+    per-provider value overrides the global, so when the effective budget is
+    not the default the user should change that override, not the global."""
     # Precedence (see _resolve_max_steps): a model-level or provider-level
     # value wins over the global, so if the effective budget below is not
     # DEFAULT_MAX_STEPS the global value is not what you want to touch.
