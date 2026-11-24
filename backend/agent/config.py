@@ -37,6 +37,16 @@ CONFIG_PATH = Path(
 DEFAULTS = {
     # New-chat reasoning effort is selected from the sidebar, not Settings.
     "reasoning_effort": "",
+    # Agent loop tool-call rounds per turn (Settings -> General -> Max steps).
+    "max_steps": 20,
+    # Pre-PR verification: run deterministic checks before push/PR
+    "pre_pr": {
+        "enabled": True,
+        "checks": [
+            {"name": "lint", "command": "npx eslint src/ --max-warnings 0"},
+            {"name": "typecheck", "command": "npx tsc --noEmit"},
+        ],
+    },
     # Agent loop tool-call rounds per turn (Settings → General → Max steps).
     "max_steps": 200,
     # Per-model step budgets (Settings -> Providers -> each model entry).
