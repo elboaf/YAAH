@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, COPY_COMMAND } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, COPY_COMMAND } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -121,24 +121,24 @@ const ComposerInner = ({
     })
   }, [editor, onChange, syncingRef])
 
-  // Paste files via PASTE_COMMAND. When clipboard has files and a callback
-  // is set, consume the command to prevent default paste; otherwise let
-  // normal paste continue.
+  // Paste files via a native listener on the contentEditable root. This
+  // bypasses Lexical's command chain: registerRichText registers its own
+  // PASTE_COMMAND at COMMAND_PRIORITY_EDITOR (100) that consumes clipboard
+  // files and returns true, which stops the chain before any lower-priority
+  // handler runs. The old textarea handled paste directly on the DOM, so we
+  // restore that path here instead of relying on the command chain.
   useEffect(() => {
-    return editor.registerCommand(
-      PASTE_COMMAND,
-      (event) => {
-        if (!onPasteFiles) return false
-        const ce = event as ClipboardEvent
-        const files = ce.clipboardData?.files
-        if (!files?.length) return false
-        event.preventDefault()
-        onPasteFiles(files)
-        return true
-      },
-      0,
-    )
-  }, [editor, onPasteFiles])
+    const root = editorRootRef.current
+    if (!root || !onPasteFiles) return
+    const onPaste = (e: ClipboardEvent) => {
+      const files = e.clipboardData?.files
+      if (!files?.length) return
+      e.preventDefault()
+      onPasteFiles(files)
+    }
+    root.addEventListener('paste', onPaste)
+    return () => root.removeEventListener('paste', onPaste)
+  }, [editorRootRef, onPasteFiles])
 
   // Clipboard: convert selected chips to their literal `$name` tokens on copy.
   // Lexical's default range export skips inline element content, so chips would
