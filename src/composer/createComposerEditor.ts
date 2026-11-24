@@ -96,6 +96,10 @@ function serializeNode(node: any, nodeMap: Map<string, any>): string {
   if (node.__type === 'text') {
     return node.__text ?? ''
   }
+  // Tab character.
+  if (node.__type === 'tab') {
+    return '\t'
+  }
   // Line break within a paragraph.
   if (node.__type === 'linebreak') {
     return '\n'

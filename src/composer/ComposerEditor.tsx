@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, COPY_COMMAND } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -67,7 +67,15 @@ const ComposerInner = ({
   // Push `value` into the editor whenever the parent changes it (dictation,
   // draft restore, skill pick, programmatic clear). Parse `$name` tokens
   // matching known skills into SkillChipNodes. Wrap content in a paragraph.
+  // Skip if the editor already contains the same serialized value, so that
+  // the user's own typed chip tokens don't trigger a rebuild-and-reselect
+  // loop from the parent's echoed value.
   useEffect(() => {
+    // Serialize the current editor state and compare before rebuilding.
+    // If the user typed `$skill` and it was already converted to a chip,
+    // the serialized text will match `value` exactly — skip the rebuild.
+    const current = serializeEditorState(editor.getEditorState())
+    if (current === value) return
     syncingRef.current = true
     editor.update(() => {
       const root = $getRoot()
@@ -131,6 +139,36 @@ const ComposerInner = ({
       0,
     )
   }, [editor, onPasteFiles])
+
+  // Clipboard: convert selected chips to their literal `$name` tokens on copy.
+  // Lexical's default range export skips inline element content, so chips would
+  // otherwise be lost in clipboard text.
+  useEffect(() => {
+    return editor.registerCommand(
+      COPY_COMMAND,
+      (event: ClipboardEvent | KeyboardEvent | null) => {
+        editor.update(() => {
+          const selection = $getSelection()
+          if (!$isRangeSelection(selection) && !$isNodeSelection(selection)) {
+            return
+          }
+          const nodes = selection.getNodes()
+          let clipboardText = ''
+          for (const node of nodes) {
+            if (node instanceof SkillChipNode) {
+              clipboardText += `$${node.skillName}`
+            } else {
+              clipboardText += node.getTextContent()
+            }
+          }
+          event.preventDefault()
+          event.clipboardData?.setData('text/plain', clipboardText)
+        })
+        return true
+      },
+      0,
+    )
+  }, [editor])
 
   // Expose the editor on the contentEditable root for test access.
   useEffect(() => {
