@@ -149,7 +149,8 @@ import { parseLegacyAttachments } from './legacyAttachments'
 import { sortWorkspaceGroups } from './workspaceGroupOrder'
 import { INLINE_LIMIT_BYTES, type Attachment } from './attachments'
 import { nearestRowByY, reorderIds } from './workspaceReorder'
-import { extractValidTokens, menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE, type TokenSpan } from './skillTokens'
+import { menuQuery, completeToken, deriveInvokedSkills, LEADING_SLASH_RE } from './skillTokens'
+import { ComposerEditor, type ComposerHandle } from './composer/ComposerEditor'
 import { stripProviderMarkup } from './providerMarkup'
 import { createPortal } from 'react-dom'
 import { transcriptSelection, googleSearchUrl } from './selectionSearch'
@@ -11097,16 +11098,10 @@ export function Composer({
     return s.pendingPlanApprovals[key] ?? null
   })
   const [input, setInput] = useState('')
-  // Inline skill-token chips (#105 design): every valid $name token in the
-  // composer text renders as an indigo chip painted OVER the token — the
-  // text stays real underneath (the model receives it verbatim) and the
-  // overlay is pointer-events:none so editing is untouched. Text is the
-  // source of truth: per keystroke the token spans are re-derived, so
-  // deleting the token removes its chip (Q4/Q5/Q7: no inline ×, removal =
-  // backspace). Rects are measured with a canvas mirror of the textarea's
-  // metrics (see the measure effect below).
-  const [tokenRects, setTokenRects] = useState<Array<{ span: TokenSpan; left: number; top: number; width: number; height: number }>>([])
-  const skillOverlayCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  // The Lexical composer now renders real skill chips (inline nodes) instead
+  // of the old canvas-measured indigo overlay (#711 phase 2). The overlay,
+  // tokenRects state, and canvas measurement are gone — chips are real nodes
+  // that serialize to `$name` tokens for the send path.
   const [sending, setSending] = useState(false)
   // Issue #7 queue: echoes of messages queued during this run (transcript
   // rows marked queued) + pill open state + steer-in-flight flag.
@@ -11144,13 +11139,8 @@ export function Composer({
   const isAgentChat =
     conversationId !== null && Boolean(agentChatByConv[String(conversationId)])
 
-  // Collapse the auto-grown textarea back to its resting height whenever the
-  // draft empties (send, skill pick, restore-on-error keeps content so no reset).
-  useEffect(() => {
-    if (input === '' && textareaRef.current) {
-      textareaRef.current.style.height = ''
-    }
-  }, [input])
+  // The Lexical composer handles its own auto-grow; the old textarea height
+  // reset is no longer needed (removed with the overlay in #711 phase 2).
 
   // ---- skills (/ autocomplete + chips, $ inline invocation) ----
   const [skills, setSkills] = useState<SkillInfo[]>([])
@@ -11163,7 +11153,9 @@ export function Composer({
   const [skillNavigated, setSkillNavigated] = useState(false)
   /** Which character opened the menu: '/' adds a chip, '$' completes inline. */
   const [skillTrigger, setSkillTrigger] = useState<'/' | '$'>('/')
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // Composer editor handle for focus (Lexical composer replaces the old
+  // textarea; focus targets the editor root element).
+  const composerRef = useRef<ComposerHandle | null>(null)
 
   // ---- voice dictation (click-to-toggle; text lands in the input) ----
   const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle')
@@ -11247,7 +11239,7 @@ export function Composer({
       } finally {
         recorderRef.current = null
         setVoiceState('idle')
-        textareaRef.current?.focus()
+        composerRef.current?.focus()
       }
       return
     }
@@ -11649,84 +11641,18 @@ export function Composer({
   )
 
   const knownSkillNamesSet = useMemo(() => new Set(skills.map((s) => s.name)), [skills])
-  const activeTokens = useMemo(() => extractValidTokens(input, knownSkillNamesSet), [input, knownSkillNamesSet])
-
-  // Measure each token's pixel rect for the chip overlay. A canvas set to
-  // the textarea's computed font (and its content-box width for wrapping)
-  // mirrors where the browser lays the token: find the line containing the
-  // token start, wrap-measure up to it, and take the run's width. Runs on
-  // every input change (Q5: keystroke-synced) and on resize.
-  useEffect(() => {
-    const el = textareaRef.current
-    if (!el) {
-      setTokenRects([])
-      return
-    }
-    if (activeTokens.length === 0) {
-      setTokenRects([])
-      return
-    }
-    const cs = window.getComputedStyle(el)
-    const canvas = (skillOverlayCanvasRef.current ??= document.createElement('canvas'))
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
-    const lineHeight = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.5
-    const padX = parseFloat(cs.paddingLeft)
-    const padTop = parseFloat(cs.paddingTop)
-    const wrapWidth = el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight)
-    const measure = (text: string) => ctx.measureText(text).width
-    const rects: Array<{ span: TokenSpan; left: number; top: number; width: number; height: number }> = []
-    for (const span of activeTokens) {
-      const before = input.slice(0, span.start)
-      const token = input.slice(span.start, span.end)
-      const lines = before.split('\n')
-      const lastLine = lines[lines.length - 1]
-      const lineIdxBefore = lines.length - 1
-      // Wrap-walk the last line of `before` to find the token's line + x.
-      // An empty line (token at input start or right after a newline) must
-      // stay at x=0: split(/ /) on '' yields one empty word, and measuring
-      // it as a space adds a phantom leading space width (~half a character).
-      let x = 0
-      let line = lineIdxBefore
-      for (const word of lastLine === '' ? [] : lastLine.split(/ /)) {
-        const w = measure(word === '' ? ' ' : word)
-        const space = measure(' ')
-        if (x > 0 && x + w > wrapWidth) {
-          line += 1
-          x = 0
-        }
-        x += w + space
-      }
-      x = Math.max(0, x - measure(' '))
-      // The token itself may wrap; measure its widest single line.
-      let tw = 0
-      for (const part of token.split(/ /)) tw = Math.max(tw, measure(part))
-      const h = lineHeight
-      // The token may span 2 wrapped lines; clamp visually with the simple
-      // single-line rect (tokens are short — skill names).
-      rects.push({ span, left: padX + x, top: padTop + line * h, width: Math.min(tw, wrapWidth), height: h })
-    }
-    setTokenRects(rects)
-  }, [input, activeTokens])
 
   const pickSkill = (s: SkillInfo) => {
     // Unified token flow (#105 follow-up): both triggers complete the token
     // IN the text — canonical `$name ` with a trailing space. `$` replaces
     // just the typed partial; `/` (start-of-input gesture) rewrites the
-    // whole leading token. The chip rendering is derived from the text by
-    // the overlay, so no separate picked-skills state exists anymore.
+    // whole leading token. The chip is now a real Lexical node (the old
+    // overlay is gone, #711 phase 2); the editor keeps the caret after the
+    // inserted token.
     const mq = menuQuery(input)
     if (mq) {
       setInput(completeToken(input, mq, s.name))
-      // Keep caret after the inserted token (textarea auto-grows on change).
-      requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (!el) return
-        const caret = mq.trigger === '/' ? s.name.length + 2 : mq.tokenStart + s.name.length + 2
-        el.focus()
-        el.setSelectionRange(caret, caret)
-      })
+      composerRef.current?.focus()
     }
     setSkillMenuOpen(false)
     setSkillNavigated(false)
@@ -12415,7 +12341,7 @@ export function Composer({
         // release-time pin so the restored draft follows the live
         // workspace again instead of freezing on the old one.
         useAgent.getState().clearOrphanedDraftPin()
-        textareaRef.current?.focus()
+        composerRef.current?.focus()
         if (opts?.throwOnError) throw e
       }
     } finally {
@@ -12859,20 +12785,11 @@ export function Composer({
             </button>
           </div>
         )}
-        <div className="relative">
-        {tokenRects.map(({ span, left, top, width, height }) => (
-          <div
-            key={`${span.start}-${span.name}`}
-            aria-hidden
-            className="pointer-events-none absolute rounded bg-indigo-900/60"
-            style={{ left, top, width, height, border: '1px solid rgba(129,140,248,0.35)' }}
-          />
-        ))}
-        <textarea
-          ref={textareaRef}
-          className="block w-full resize-none bg-transparent px-3 py-2 text-sm text-zinc-100 focus:outline-none"
-          rows={2}
-          style={{ height: 'auto', minHeight: '3.25rem', maxHeight: '16rem', boxSizing: 'border-box' }}
+        <ComposerEditor
+          ref={composerRef}
+          value={input}
+          onChange={setInput}
+          knownSkills={knownSkillNamesSet}
           placeholder={
             voiceState === 'recording'
               ? pttHeldRef.current
@@ -12884,22 +12801,6 @@ export function Composer({
                   ? 'This is an agent chat — messages become standing instructions (they never start a run)'
                   : 'Describe a task... (drop/paste/attach images or text files; type / to load a skill)'
           }
-          aria-label="Message the agent"
-          value={input}
-          onChange={(e) => {
-            setInput(e.target.value)
-            // Auto-grow with content, capped at ~8 rows; resets on send.
-            const el = e.target
-            el.style.height = 'auto'
-            el.style.height = `${Math.min(el.scrollHeight, 256)}px`
-          }}
-          onPaste={(e) => {
-            const files = e.clipboardData?.files
-            if (files?.length) {
-              e.preventDefault()
-              addFiles(files)
-            }
-          }}
           onKeyDown={(e) => {
             // IME safety: Enter confirming a CJK composition must never send
             // or pick a skill (isComposing is true for the whole composition).
@@ -12962,8 +12863,8 @@ export function Composer({
               void send()
             }
           }}
+          onPasteFiles={addFiles}
         />
-        </div>
         <input
           ref={fileInputRef}
           type="file"
