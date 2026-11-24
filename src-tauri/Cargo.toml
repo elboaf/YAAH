@@ -40,3 +40,28 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 # open_external (#59): ShellExecuteW without going through cmd.exe.
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation"] }
+
+# glib 0.20.12 via git patch (RUSTSEC-2024-0429, Dependabot alert #5).
+# glib 0.18.5 has unsound VariantStrIter impls (NULL deref); fixed in glib 0.20.0+.
+# Patch the shared `links` chain so the same glib-2.0/gio-2.0/gobject-2.0 native
+# libs are linked — no new system deps. webkit2gtk stays 2.x (matches tauri's gtk ^0.18).
+[patch.crates-io]
+cairo-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+cairo-sys-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+gdk-pixbuf = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+gdk-pixbuf-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+gio = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+gio-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+glib = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+glib-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+pango = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+pango-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+pangocairo = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+pangocairo-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+atk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+atk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gdk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gdk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gtk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gtk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
