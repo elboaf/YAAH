@@ -54,6 +54,7 @@ describe('composer: skill chip renders from in-editor text', () => {
     // then fire input so the parent's `input` state picks up `$ask-matt`.
     const editor = (box as unknown as { __editor?: { update: (fn: () => void) => void } }).__editor
     await act(async () => {
+      if (!editor) return
       await editor.update(() => {
         const root = $getRoot()
         root.clear()
