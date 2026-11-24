@@ -70,7 +70,7 @@ export function createComposerEditor(
 
 /** Serialize an editor state to the plain text YAAH sends: walk the node map
  *  in document order, concatenating TextNode `__text` and SkillChipNode
- *  `$<skillName>` tokens.
+ *  `$<skillName>` tokens. Block elements are separated by newlines.
  *
  *  Lexical stores children as a singly linked list (`__first`/`__next`), not
  *  an array, so we walk that list. The old `__children`-based walk matched an
@@ -80,6 +80,10 @@ export function serializeEditorState(editorState: EditorState): string {
   const root = nodeMap.get('root') as any
   if (!root) return ''
   return serializeNode(root, nodeMap)
+}
+
+function isBlockNode(node: any): boolean {
+  return node.__type === 'paragraph' || node.__type === 'root'
 }
 
 function serializeNode(node: any, nodeMap: Map<string, any>): string {
@@ -92,11 +96,18 @@ function serializeNode(node: any, nodeMap: Map<string, any>): string {
   if (node.__type === 'text') {
     return node.__text ?? ''
   }
-  // Container (paragraph, etc.): walk the linked list of children in order.
+  // Line break within a paragraph.
+  if (node.__type === 'linebreak') {
+    return '\n'
+  }
+  // Container (paragraph, root): walk children; separate block children with newlines.
   let out = ''
   let cur = node.__first
   while (cur) {
     const child = nodeMap.get(cur)
+    if (out && isBlockNode(child)) {
+      out += '\n'
+    }
     out += serializeNode(child, nodeMap)
     cur = child.__next
   }
