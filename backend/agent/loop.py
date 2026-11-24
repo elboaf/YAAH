@@ -986,6 +986,12 @@ async def _wait_answer(
         )
         if fut in done:
             return fut
+        # Issue #811: distinguish user stop/cancel (cancel_ev set) from
+        # stream death (task cancelled, cancel_ev NOT set). On stream
+        # teardown, re-raise so the generator's finally releases the
+        # claim and the chat doesn't wedge as a zombie.
+        if not cancel_ev.is_set():
+            raise asyncio.CancelledError("stream torn down before answer")
         raise asyncio.CancelledError("run stopped before answer")
     finally:
         cancel_task.cancel()
@@ -1017,8 +1023,12 @@ async def _ask_user(
         fut = await _wait_answer(
             conversation_id, call_id, cancel_ev, owner_id=owner_id
         )
-    except asyncio.CancelledError:
-        return {"answer": None, "note": "user did not answer (run stopped)"}
+    except asyncio.CancelledError as exc:
+        # Stream teardown (cancel_ev not set) propagates; user stop
+        # produces the not-answered result.
+        if cancel_ev.is_set():
+            return {"answer": None, "note": "user did not answer (run stopped)"}
+        raise exc
     return {"answer": fut.result()}
 
 
@@ -1329,8 +1339,10 @@ async def _exit_plan(
         return {"error": "exit_plan requires a non-empty `plan` argument"}
     try:
         fut = await _wait_answer(conversation_id, call_id, cancel_ev)
-    except asyncio.CancelledError:
-        return {"decision": "cancelled", "note": "user did not answer (run stopped)"}
+    except asyncio.CancelledError as exc:
+        if cancel_ev.is_set():
+            return {"decision": "cancelled", "note": "user did not answer (run stopped)"}
+        raise exc
     answer = fut.result()
     if answer == "approve":
         save_config({"access_mode": "full"})
@@ -1347,8 +1359,10 @@ async def _await_approval(
     card). None = approved; dict = denial error result for the model."""
     try:
         fut = await _wait_answer(conversation_id, call_id, cancel_ev)
-    except asyncio.CancelledError:
-        return {"error": "user did not answer the approval request (run stopped)"}
+    except asyncio.CancelledError as exc:
+        if cancel_ev.is_set():
+            return {"error": "user did not answer the approval request (run stopped)"}
+        raise exc
     answer = fut.result()
     if answer == _APPROVE:
         return None
