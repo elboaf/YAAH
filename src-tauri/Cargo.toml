@@ -41,24 +41,29 @@ libc = "0.2"
 # open_external (#59): ShellExecuteW without going through cmd.exe.
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation"] }
 
-# glib 0.20.12 via git patch (RUSTSEC-2024-0429, Dependabot alert #5).
+# glib 0.20.12 via coordinated patch (RUSTSEC-2024-0429, Dependabot alert #5).
 # glib 0.18.5 has unsound VariantStrIter impls (NULL deref); fixed in glib 0.20.0+.
-# Patch the shared `links` chain so the same glib-2.0/gio-2.0/gobject-2.0 native
-# libs are linked — no new system deps. webkit2gtk stays 2.x (matches tauri's gtk ^0.18).
+# The fix requires a coordinated version bump across the whole gtk-rs + webkit2gtk
+# chain (verified: no single version works). glib 0.20.12 lives in gtk-rs-core
+# 0.22.0 (requires glib ^0.22); gtk-rs 0.19.0 requires glib ^0.22; webkit2gtk
+# 3.0.0 requires glib ^0.22 + gtk-sys ^0.19. tauri 2.12.7 pins gtk ^0.18 and
+# webkit2gtk ^2, so tauri itself is patched from git (tag tauri-v2.12.7) to use
+# gtk 0.19. libappindicator 0.10.0 (gtk ^0.19) replaces 0.9.0 (gtk ^0.18).
+# The same glib-2.0/gio-2.0/gobject-2.0 native libs are linked — no new system deps.
 [patch.crates-io]
-cairo-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-cairo-sys-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-gdk-pixbuf = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-gdk-pixbuf-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-gio = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-gio-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-glib = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-glib-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-pango = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-pango-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-pangocairo = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
-pangocairo-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.20.12" }
+glib = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+glib-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gio = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gio-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+cairo-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+cairo-sys-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pango = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pango-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pangocairo = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pangocairo-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gdk-pixbuf = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gdk-pixbuf-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
 atk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
 atk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
 gdk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
