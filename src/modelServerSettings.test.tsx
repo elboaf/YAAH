@@ -55,6 +55,10 @@ vi.mock('./api', async (importOriginal) => {
 
 import { ModelServerSettingsCard, RerankerServerSettingsCard } from './components'
 
+// A non-Windows UA exercises the platform guard.
+const linuxAgent = 'Mozilla/5.0 (X11; Linux x86_64)'
+const windowsAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+
 const models = [
   { id: 'qwen3-embedding-0.6b', name: 'Qwen3-Embedding-0.6B (GGUF)', tasks: ['embedding'] },
   { id: 'qwen3-reranker-0.6b', name: 'Qwen3-Reranker-0.6B (GGUF)', tasks: ['reranking'] },
@@ -89,6 +93,11 @@ beforeEach(() => {
     gpu_offload: false,
   })
   getModelServerModels.mockResolvedValue({ models })
+  // Reset platform to Windows so a non-Windows test can't leak forward.
+  Object.defineProperty(window.navigator, 'userAgent', {
+    value: windowsAgent,
+    configurable: true,
+  })
 })
 
 afterEach(() => cleanup())
@@ -103,6 +112,26 @@ describe('Model server settings card (#730)', () => {
     expect(
       (screen.getByRole('button', { name: 'Stop' }) as HTMLButtonElement).disabled,
     ).toBe(true)
+  })
+
+  it('hides the whole section on non-Windows builds', () => {
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: linuxAgent,
+      configurable: true,
+    })
+    render(<ModelServerSettingsCard />)
+    expect(screen.queryByText(/Local model/i)).toBeNull()
+    expect(getModelServerStatus).not.toHaveBeenCalled()
+  })
+
+  it('hides the reranker section on non-Windows builds', () => {
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: linuxAgent,
+      configurable: true,
+    })
+    render(<RerankerServerSettingsCard />)
+    expect(screen.queryByText(/Local model/i)).toBeNull()
+    expect(getModelServerStatus).not.toHaveBeenCalled()
   })
 
   it('shows running status with port when server is up', async () => {
