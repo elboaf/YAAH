@@ -3654,6 +3654,7 @@ async def execute_tool(
     conversation_id: int | None = None,
     memory_workspace: str | None = None,
     user_text: str | None = None,
+    skip_prepr: bool = False,
 ) -> dict:
     """Execute a tool by name with a dict of arguments. Never raises.
 
@@ -3692,6 +3693,19 @@ async def execute_tool(
         from backend.agent import mcp_client
 
         return await mcp_client.manager.call(name, arguments)
+    # Pre-PR verification: intercept push/PR commands and run checks
+    if name in ("bash", "powershell") and not skip_prepr:
+        cmd = arguments.get("command", "")
+        from . import prepr
+        if prepr.looks_like_push(cmd):
+            result = prepr.verify_before_push(cmd, workspace, conversation_id)
+            prepr_text = prepr.format_for_agent(result)
+            log.info(f"Pre-PR verification for {name}: {prepr_text[:200]}")
+            # Run the actual command first, then append verification results
+            actual_result = await fn(name, arguments)
+            actual_result["prepr_verification"] = prepr_text
+            return actual_result
+
     fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
