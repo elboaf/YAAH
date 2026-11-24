@@ -8,6 +8,7 @@ import asyncio
 import codecs
 import fnmatch
 import json
+import logging
 import os
 import re
 import signal
@@ -3693,20 +3694,25 @@ async def execute_tool(
         from backend.agent import mcp_client
 
         return await mcp_client.manager.call(name, arguments)
+    fn = EXECUTORS.get(name)
+    if fn is None:
+        return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
+
     # Pre-PR verification: intercept push/PR commands and run checks
     if name in ("bash", "powershell") and not skip_prepr:
         cmd = arguments.get("command", "")
         from . import prepr
         if prepr.looks_like_push(cmd):
-            result = prepr.verify_before_push(cmd, workspace, conversation_id)
-            prepr_text = prepr.format_for_agent(result)
-            log.info(f"Pre-PR verification for {name}: {prepr_text[:200]}")
-            # Run the actual command first, then append verification results
+            try:
+                result = prepr.verify_before_push(cmd, str(workspace_root(workspace)), conversation_id)
+                prepr_text = prepr.format_for_agent(result)
+            except Exception as e:
+                prepr_text = f"Pre-PR verification unavailable: {e}"
+            logging.info(f"Pre-PR verification for {name}: {prepr_text[:200]}")
+            # Run the actual command regardless, then append verification results
             actual_result = await fn(name, arguments)
             actual_result["prepr_verification"] = prepr_text
             return actual_result
-
-    fn = EXECUTORS.get(name)
     if fn is None:
         return {"error": f"Unknown tool: {name}. Available: {sorted(EXECUTORS)}"}
     if name in _MEMORY_TOOL_NAMES and not memory_enabled():
