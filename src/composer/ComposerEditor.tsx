@@ -98,11 +98,18 @@ const ComposerInner = ({
     syncingRef.current = false
   }, [value, editor, knownSkills, syncingRef])
 
-  // Serialize text changes back to the parent.
+  // Serialize text changes back to the parent. Use an update listener that
+  // compares serialized output, because a chip-only change (e.g. swapping one
+  // skill for another) does not change text content but must notify the parent.
   useEffect(() => {
-    return editor.registerTextContentListener(() => {
-      if (syncingRef.current) return
-      onChange(serializeEditorState(editor.getEditorState()))
+    let previousText = serializeEditorState(editor.getEditorState())
+    return editor.registerUpdateListener(() => {
+      const currentText = serializeEditorState(editor.getEditorState())
+      if (currentText !== previousText) {
+        previousText = currentText
+        if (syncingRef.current) return
+        onChange(currentText)
+      }
     })
   }, [editor, onChange, syncingRef])
 
