@@ -393,10 +393,14 @@ HELP_DOCS: dict = {
         "Text-to-image AND reference-guided editing on the stable-"
         "diffusion.cpp server configured in Settings (Image generation). "
         "The image is saved into the workspace under ai-images/ and "
-        "attached to the conversation, so the user sees it inline; it is "
-        "NOT sent back to you - call view_image on the saved file only if "
-        "you must inspect it (e.g. the user asks to change something "
-        "specific about it). TWO PROMPTING DISCIPLINES (official klein "
+        "attached to the conversation, so the user sees it inline. One "
+        "request = one render: when it lands, comment in text what you "
+        "made and stop - make no further tool calls on your own initiative "
+        "(no view_image of the render, no follow-up generate_image, no "
+        "upscale_image). Whether it is good enough, and whether to iterate, "
+        "is the user's decision. View the saved file again ONLY when the "
+        "user asks for changes - that explicit request re-opens the license "
+        "to inspect the file and edit. TWO PROMPTING DISCIPLINES (official klein "
         "guide - they are opposites): CREATE (mode \"generate\", no "
         "references) - flowing novelist prose, not keywords; front-load "
         "the subject and action; describe lighting like a photographer "
@@ -1828,10 +1832,14 @@ GENERATE_IMAGE_SCHEMA = {
             "Generate an image from a text prompt with the local "
             "stable-diffusion.cpp server (set in Settings). Saves the PNG "
             "into the workspace under ai-images/ AND attaches it to this "
-            "conversation so the user sees it inline. Use for logos, "
-            "mockups, illustrations, art assets. The image is not sent "
-            "back to you; view_image the saved file only if inspection is "
-            "needed. PROMPTING (official klein guide, two opposite "
+            "conversation so the user sees it inline. One request = one "
+            "render: when it lands, comment in text what you made and stop - "
+            "make no further tool calls on your own initiative (no view_image "
+            "of the render, no follow-up generate_image, no upscale_image). "
+            "Whether it is good enough, and whether to iterate, is the user's "
+            "decision. View the saved file again ONLY when the user asks for "
+            "changes - that explicit request re-opens the license to inspect "
+            "the file and edit. PROMPTING (official klein guide, two opposite "
             "disciplines): CREATE - flowing novelist prose, not keywords; "
             "front-load the subject and action; describe lighting like a "
             "photographer, the single highest-impact element; every "
@@ -2035,6 +2043,8 @@ UPSCALE_IMAGE_SCHEMA = {
             "server's ESRGAN models (no re-generation - detail-preserving, "
             "fast). Use to enlarge a previously generated or saved image, "
             "e.g. when the user wants the same picture at a bigger size. "
+            "User-initiated only: after it lands, comment in text and stop - "
+            "do not chain it after generate_image on your own initiative. "
             "The result is saved as a NEW file and shown to the user "
             "inline."
         ),
@@ -3511,12 +3521,12 @@ def _generation_result(
         target.write_bytes(raw)
         out["path"] = f"{rel_dir}/{target.name}"
         out["saved_to"] = out["path"]
-        # Audit/inspection hint: the tool result renders in the tape, but
-        # if the agent wants to SEE the image, the store rel is the handle
+        # Audit/inspection hint: when the user asks for changes and the
+        # agent needs to view the render again, the store rel is the handle
         # that always works for view_image - the workspace-relative path
         # only exists in named workspaces (Default = home dir, where the
         # ai-images copy sits next to unrelated user files).
-        out["view_hint"] = f"to inspect this image: view_image {store_rel}"
+        out["view_hint"] = f"when the user asks for changes: view_image {store_rel}"
     except OSError as e:
         out["note"] = (out.get("note", "") + f" workspace copy failed: {e}").strip()
     return out
