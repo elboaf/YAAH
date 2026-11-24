@@ -150,6 +150,9 @@ const ComposerInner = ({
       PASTE_COMMAND,
       (event) => {
         if (!onPasteFiles) return false
+        if (!event || typeof event.preventDefault !== 'function') {
+          return false
+        }
         const ce = event as ClipboardEvent
         const files = ce.clipboardData?.files
         if (!files?.length) return false
