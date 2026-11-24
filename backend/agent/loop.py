@@ -422,6 +422,20 @@ async def _race_stream_iter(stream, cancel_ev: asyncio.Event | None):
 DEFAULT_MAX_STEPS = 200
 
 
+def _step_budget_message(max_steps: int) -> str:
+    """The system message posted when a turn exhausts its step budget.
+
+    Names only surfaces that exist: the per-model max steps in Settings →
+    Providers (each model entry), and config.json `max_steps` (0 = unlimited).
+    The old "Settings → General → Max steps" pointer named a tab/field that
+    does not exist, so following it led nowhere (#838)."""
+    return (
+        f"Step budget ({max_steps}) exhausted — raise it in "
+        "Settings → Providers (per-model max steps), or config.json `max_steps` "
+        "(0 = unlimited)"
+    )
+
+
 def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
     """Step budget for one turn: the model's own entry (config.model_steps)
     wins, then the global; missing or invalid values fall through, and
@@ -3339,10 +3353,7 @@ async def _run_agent_claimed(
                         }
                     )
 
-        budget_msg = (
-            f"Step budget ({max_steps}) exhausted — raise it in "
-            "Settings → General → Max steps (or config.json `max_steps`; 0 = unlimited)"
-        )
+        budget_msg = _step_budget_message(max_steps)
         await add_message(conversation_id, "system", f"turn failed: {budget_msg}")
         async for _fev in _finalize_file_changes():
             yield _fev
