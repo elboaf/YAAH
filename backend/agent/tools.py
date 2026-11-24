@@ -3710,7 +3710,7 @@ async def execute_tool(
                 prepr_text = f"Pre-PR verification unavailable: {e}"
             logging.info(f"Pre-PR verification for {name}: {prepr_text[:200]}")
             # Run the actual command regardless, then append verification results
-            actual_result = await fn(name, arguments)
+            actual_result = await fn(workspace=workspace, **arguments)
             actual_result["prepr_verification"] = prepr_text
             return actual_result
     if fn is None:
