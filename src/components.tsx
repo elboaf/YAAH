@@ -11331,6 +11331,11 @@ export function Composer({
 
   const pttPress = async () => {
     if (pttBusyRef.current) return // previous release is still in flight
+    // #717: pressing the mic to dictate cuts active narration. The old
+    // release-time stop left the queue running across the whole press, so a
+    // long hold kept talking while the user was trying to speak. Drop it now,
+    // at the moment the mic is taken.
+    useTts.getState().stop()
     const targetState = useAgent.getState()
     const pttTarget = {
       conversationId: targetState.conversationId,
