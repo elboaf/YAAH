@@ -64,6 +64,17 @@ MAX_TRANSCRIPT_CHARS = 200_000
 # disconnected), the batch gets this many seconds to shut down via the
 # cancel event and return partial results before it is hard-cancelled.
 SPAWN_GRACE_SECONDS = 10.0
+# A sub-agent's model call is expected to emit its first response byte
+# (text/thinking/tool_call) within this window. A provider that accepts the
+# connection and then hangs (llama.cpp with a dead single slot, issue #550)
+# would otherwise keep the sub silent for up to CHAT_READ_TIMEOUT (3600s)
+# while the parent blocks on the batch with no stage visibility. This is a
+# UI-liveness guard, not a correctness one: a slow-but-live provider that
+# produces content after the window still completes normally; a sub that
+# makes NO model call at all is exempt. The hang is surfaced as a distinct
+# status so the chip can render "no response from <provider>" instead of
+# pulsing "running" forever.
+SUB_AGENT_NO_FIRST_BYTE_TIMEOUT = 60.0
 
 
 @dataclass
