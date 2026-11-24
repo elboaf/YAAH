@@ -434,6 +434,91 @@ async def test_spawn_batch_empty_prompt(fake_model, tmp_path):
     assert "error" in results["c0"]
 
 
+# ---------------------------------------------------------------- #550 hang
+
+
+class _SlowStream:
+    """A stream that never yields its first byte: the model call is silent.
+
+    The watchdog fires after SUB_AGENT_NO_FIRST_BYTE_TIMEOUT and the sub is
+    surfaced as hung, not left pulsing 'running' for up to CHAT_READ_TIMEOUT.
+    It blocks indefinitely on __anext__ so the consume task never completes
+    on its own.
+    """
+
+    def __init__(self):
+        pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(3600.0)  # never yields a first byte
+        raise StopAsyncIteration
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_no_first_byte_is_hung(tmp_path, monkeypatch):
+    # No first byte ever: a provider that accepts the connection and hangs.
+    async def fake_chat(*a, **k):
+        return _SlowStream()
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    monkeypatch.setattr(
+        subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 0.05
+    )
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "find issues", str(tmp_path)
+    )
+    assert result["status"] == "hung"
+    assert "no response" in result["output"]
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_first_byte_after_delay_completes(tmp_path, monkeypatch):
+    # First byte arrives after the window but before cancellation takes
+    # effect: the watchdog's early-exit event means the sub completes
+    # normally. A slow-but-live provider is never misclassified as hung.
+    monkeypatch.setattr(
+        subagents.model_client,
+        "chat",
+        lambda *a, **k: _stream_coro([{"type": "content", "text": "done"}]),
+    )
+    monkeypatch.setattr(
+        subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 0.05
+    )
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "do it", str(tmp_path)
+    )
+    assert result["status"] == "completed"
+    assert result["output"] == "done"
+
+
+async def _stream_coro(events):
+    class _S:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not events:
+                raise StopAsyncIteration
+            return events.pop(0)
+
+    return _S()
+
+
+async def _slow_stream_coro(delay):
+    class _S:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(delay)
+            raise StopAsyncIteration
+
+    return _S()
+
+
 # ---------------------------------------------------------------- loop integration
 
 

@@ -53,7 +53,7 @@ export interface SubAgentRun {
   agentId: number
   agentType: string
   prompt: string
-  status: 'running' | 'completed' | 'error' | 'cancelled' | 'max_turns'
+  status: 'running' | 'completed' | 'error' | 'cancelled' | 'max_turns' | 'hung'
   /** Streamed assistant emissions from the sub-agent, newline-separated. */
   text: string
   /** Latest assistant emission, kept separately for the collapsed one-line preview. */

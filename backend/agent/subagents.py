@@ -466,6 +466,21 @@ def _resolve_subagent_model(chat_scope: str | None = None) -> tuple[str, str]:
     return raw, ""
 
 
+async def _watchdog_first_byte(
+    first_byte_event: asyncio.Event, hung_event: asyncio.Event,
+) -> None:
+    """Watch for the sub's first response byte. If none arrives within
+    SUB_AGENT_NO_FIRST_BYTE_TIMEOUT, set hung_event so the parent can
+    surface the sub as hung. If the first byte arrives first, the event
+    is set by the stream consumer and this task resolves without setting
+    hung_event. A sub that makes no model call at all never starts the
+    race, so it is exempt."""
+    try:
+        await asyncio.wait_for(first_byte_event.wait(), timeout=SUB_AGENT_NO_FIRST_BYTE_TIMEOUT)
+    except asyncio.TimeoutError:
+        hung_event.set()
+
+
 async def run_sub_agent(
     defn: AgentDef,
     prompt: str,
@@ -569,6 +584,10 @@ async def run_sub_agent(
         async for ev in stream:
             if cancel_ev.is_set():
                 return
+            if ev["type"] in {"content", "thinking", "tool_calls"}:
+                # First real response byte: arm the watchdog's early exit so
+                # a slow-but-live provider is never misclassified as hung.
+                first_byte_event.set()
             if ev["type"] == "content":
                 acc.append(ev["text"])
                 if on_event:
@@ -797,14 +816,25 @@ async def run_sub_agent(
                 )
                 await _consume_stream(stream)
 
-            # Race the model call against cancellation: a parent Stop must
-            # interrupt an in-flight sub-agent model call promptly, not wait
-            # for the stream to end on its own.
+            # Race the model call against cancellation and a first-byte
+            # watchdog: a parent Stop must interrupt an in-flight sub-agent
+            # model call promptly, not wait for the stream to end on its own.
+            # The watchdog fires when the model call sends no first response
+            # byte within SUB_AGENT_NO_FIRST_BYTE_TIMEOUT (dead single slot,
+            # issue #550) — a hang that would otherwise keep the sub silent
+            # for up to CHAT_READ_TIMEOUT with the parent blocking on the
+            # batch and no stage visibility.
             consume_task = asyncio.create_task(_consume())
             cancel_task = asyncio.create_task(cancel_ev.wait())
+            first_byte_event = asyncio.Event()
+            hung_event = asyncio.Event()
+            hang_task = asyncio.create_task(
+                _watchdog_first_byte(first_byte_event, hung_event)
+            )
             try:
                 done, _ = await asyncio.wait(
-                    {consume_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+                    {consume_task, cancel_task, hang_task},
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
                 if cancel_task in done and consume_task not in done:
                     consume_task.cancel()
@@ -815,8 +845,27 @@ async def run_sub_agent(
                 elif consume_task in done:
                     # Propagate a ModelError from the consumed task.
                     consume_task.result()
+                elif hung_event.is_set():
+                    # No first byte in the window. If the parent already
+                    # requested a stop, treat the silence as a cancellation
+                    # (the partial-turn bookkeeping below still applies);
+                    # otherwise the sub genuinely hung — surface it as such
+                    # instead of pulsing "running" for up to CHAT_READ_TIMEOUT.
+                    consume_task.cancel()
+                    try:
+                        await consume_task
+                    except (asyncio.CancelledError, model_client.ModelError):
+                        pass
+                    if not cancel_ev.is_set():
+                        status = "hung"
+                        final_text = (
+                            f"[sub-agent: no response from {sub_model or 'provider'} "
+                            f"after {int(SUB_AGENT_NO_FIRST_BYTE_TIMEOUT)}s]"
+                        )
+                        break
             finally:
                 cancel_task.cancel()
+                hang_task.cancel()
                 if not consume_task.done():
                     consume_task.cancel()
                     try:

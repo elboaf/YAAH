@@ -1183,12 +1183,16 @@ function SubAgentBlock({ run }: { run: SubAgentRun }) {
           ? 'error'
           : run.status === 'cancelled'
             ? 'stopped'
-            : 'max turns'
+            : run.status === 'hung'
+              ? 'no response'
+              : 'max turns'
   const statusColor = running
     ? 'text-amber-300'
     : run.status === 'error'
       ? 'text-red-400'
-      : 'text-emerald-400'
+      : run.status === 'hung'
+        ? 'text-amber-400'
+        : 'text-emerald-400'
   return (
     <div data-subagent-card="" className="my-1 rounded   bg-zinc-900/40">
       <button
