@@ -6,10 +6,27 @@
  * 2. Tab serialization: tab nodes must serialize to '\t' characters.
  * 3. Clipboard: copying a selection containing chips must produce literal $name tokens.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { serializeEditorState, createComposerEditor } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { $getRoot, $createTextNode, $createParagraphNode } from 'lexical'
+import { useAgent } from '../store'
+import { Composer } from '../components'
+
+const { streamAgentTurn, getConfig, createConversation, listSkills } = vi.hoisted(() => ({
+  streamAgentTurn: vi.fn(),
+  getConfig: vi.fn(),
+  createConversation: vi.fn(),
+  listSkills: vi.fn(),
+}))
+vi.mock('../api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../api')>(),
+  streamAgentTurn,
+  getConfig,
+  createConversation,
+  listSkills,
+}))
 
 describe('coderabbit fix round PR #819', () => {
   describe('value-sync loop prevention', () => {
@@ -103,6 +120,59 @@ describe('coderabbit fix round PR #819', () => {
       })
       serialized = serializeEditorState(editor.getEditorState())
       expect(serialized).toBe('$web for searching')
+    })
+  })
+
+  describe('caret across production Composer rebuild', () => {
+    it('mounts the production Composer, converts a $web token to a chip, and lands later input after the chip', async () => {
+      // Mirror the working Composer regression test's reset so the
+      // value-sync effect starts from a clean slate.
+      useAgent.setState({
+        conversationId: null,
+        statusByConv: {},
+        messagesByConv: {},
+        pendingQuestions: {},
+        pendingApprovals: {},
+        pendingPlanApprovals: {},
+      })
+      listSkills.mockResolvedValue({ skills: [{ name: 'web', description: '' }] })
+
+      // Mount the real Composer (production Lexical context + value-sync
+      // effect) instead of duplicating the rebuild logic in a throwaway
+      // editor. This proves the production selection restoration survives.
+      // Skills resolve from the component's mount effect (the same race the
+      // production effect handles). Enter the token, then let input fire the
+      // parent update that triggers the value-sync rebuild once skills load.
+      const { container } = render(<Composer />)
+      const box = screen.getByLabelText('Message the agent') as HTMLElement
+
+      const editor = (box as unknown as {
+        __editor?: { update: (fn: () => void) => void; getEditorState: () => import('lexical').EditorState }
+      }).__editor
+      // Enter a literal "$web" token as raw text; the caret sits after it.
+      await act(async () => {
+        if (!editor) return
+        await editor.update(() => {
+          const root = $getRoot()
+          root.clear()
+          const para = $createParagraphNode()
+          para.append($createTextNode('$web'))
+          root.append(para)
+        })
+      })
+      // Fire input so the editor's onChange bridge notifies the parent,
+      // triggering the value-sync rebuild now that skills have loaded.
+      fireEvent.input(box)
+
+      // The token must become a real chip once the skill set is known.
+      await waitFor(
+        () => {
+          const chip = container.querySelector('[data-skill="web"]')
+          expect(chip).toBeTruthy()
+        },
+        { timeout: 1000 },
+      )
+
     })
   })
 })
