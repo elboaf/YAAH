@@ -1,0 +1,3 @@
+{
+  "ignorePatterns": ["backend/bundled_skills/**", "dist/**", "src-tauri/target/**", "node_modules/**"]
+}

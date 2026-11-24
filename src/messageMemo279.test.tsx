@@ -25,7 +25,6 @@ describe('MessageView memo (#279)', () => {
     const settled = agentMsg({ id: 'settled', content: 'old row' })
     const streaming = agentMsg({ id: 'live', content: 'growing' })
 
-    const renders: string[] = []
     const Original = MessageView
     const { rerender } = render(
       <>

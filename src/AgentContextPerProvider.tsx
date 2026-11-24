@@ -5,7 +5,6 @@
  *  a setting: the detected value (provider report -> built-in table) shows
  *  read-only as the reference for the context gauge. */
 
-import type React from 'react'
 import { useState } from 'react'
 
 /** Family base of a model id: router-slot prefixes ("1.", "x2.",

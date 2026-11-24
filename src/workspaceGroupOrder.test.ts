@@ -24,10 +24,6 @@ describe('sortWorkspaceGroups (#91)', () => {
   })
 
   it('moves a group when the workspace is deliberately touched', () => {
-    const before = [
-      group('C:/a', '2026-09-22 11:00:00'),
-      group('C:/b', '2026-09-22 10:00:00'),
-    ]
     const afterTouch = [
       group('C:/a', '2026-09-22 11:00:00'),
       group('C:/b', '2026-09-22 12:00:00'),

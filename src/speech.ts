@@ -26,6 +26,7 @@ import { ttsStop, ttsSynthesize } from './api'
 // they are stripped before synthesis. Same ranges as speak.py; â†’/â†
 // (U+2190-21FF) deliberately kept â€” legitimate technical prose.
 const EMOJI =
+  // eslint-disable-next-line no-misleading-character-class -- FE00-FE0F (variation selectors) + 200D (ZWJ) are the joiners multi-codepoint emoji are built from; stripping them whole is the point.
   /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{200D}\u{20E3}]+/gu
 
 /** Remove emoji and repair the spacing they leave behind. */
@@ -40,7 +41,7 @@ function stripEmoji(text: string): string {
 /** Markdown â†’ speakable prose: code fences and indented blocks become
  *  pauses (dropped), tables drop, links keep their label, emphasis strips.
  *  Mirrors speak.prose_for_speech. */
-export function proseForSpeech(md: string, maxChars = 4000): string {  if (!md) return ''
+export function proseForSpeech(md: string, _maxChars = 4000): string {  if (!md) return ''
   let t = md
   t = t.replace(/```[\s\S]*?```/g, '\n\n')
   t = t.replace(/^(?:    |\t).*(?:\n|$)+/gm, '\n\n')
@@ -116,8 +117,6 @@ export function stripSay(md: string): string {
 // cap lives in one place per side and both sides stay in sync.
 
 export const SAY_MAX_CHARS = 400
-
-const SENT_END = /([.!?]+["')\]]?)\s+/g
 
 /** Last-resort sentence-boundary truncation at the briefing budget. */
 function clip(text: string, maxChars = SAY_MAX_CHARS): string {
@@ -584,7 +583,7 @@ interface TtsState {
   /** One-off preview of a voice (Settings); ignores the enabled flag. */
   previewVoice: (voice: string, speed: number) => void
 }
-export const useTts = create<TtsState>((set, get) => {
+export const useTts = create<TtsState>((set) => {
   // Wire the player's phase into the store once.
   speechPlayer.subscribe(({ speaking, msgId }) => {
     set({ speaking, speakingMsgId: msgId })
@@ -693,7 +692,7 @@ const EMOTION_WORDS = new Set([
   'pause', 'pauses', 'breath', 'excitedly', 'calmly', 'seriously',
   'dramatically', 'nervously', 'cheerful', 'cheerfully', 'tone', 'ironic',
 ])
-const EMOTION_MARKER = /\[([^\[\]]+)\]/g
+const EMOTION_MARKER = /\[([^[\]]+)\]/g
 
 // SSML fragments are stripped, never read as phonemes.
 const SSML_TAG =

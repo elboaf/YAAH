@@ -6,7 +6,7 @@
  * 2. Tab serialization: tab nodes must serialize to '\t' characters.
  * 3. Clipboard: copying a selection containing chips must produce literal $name tokens.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { serializeEditorState, createComposerEditor } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { $getRoot, $createTextNode, $createParagraphNode } from 'lexical'

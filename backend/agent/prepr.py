@@ -84,6 +84,54 @@ def run_check(cmd: str, cwd: str, timeout: int = 120) -> dict:
         return {"passed": False, "output": str(e), "duration_ms": 0}
 
 
+def _marker_exists(workspace: str, *markers: str) -> bool:
+    """True when any of the given paths exists at the workspace root."""
+    root = Path(workspace)
+    return any((root / m).exists() for m in markers)
+
+
+def default_checks(workspace: str) -> list[dict]:
+    """Ecosystem-standard checks for THIS workspace, chosen by marker files.
+
+    Each default only applies when the workspace declares that ecosystem
+    (package.json -> node toolchain, pyproject.toml/requirements.txt ->
+    Python, etc.). A workspace declaring nothing gets no defaults: every
+    check SKIPs with a visible note instead of failing, so the gate works
+    out of the box in any workspace — typed or not, configured or not.
+    The fast linters here are advisory-grade (warnings pass); per-project
+    .yaah/verify.json overrides all of it.
+    """
+    checks: list[dict] = []
+
+    # Node/TypeScript: lint only when an eslint/oxlint config actually
+    # exists (linting unconfigured JS is noise); typecheck when a TS
+    # project is declared.
+    if _marker_exists(workspace, "package.json"):
+        if _marker_exists(
+            workspace,
+            "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs",
+            ".eslintrc", ".eslintrc.js", ".eslintrc.json", ".eslintrc.yml",
+        ):
+            checks.append({"name": "lint", "command": "npx eslint . --max-warnings 0"})
+        elif _marker_exists(workspace, ".oxlintrc.json", "oxlint.json"):
+            checks.append({"name": "lint", "command": "npx oxlint"})
+        # Typecheck whenever TypeScript is declared, config or not.
+        if _marker_exists(workspace, "tsconfig.json"):
+            checks.append({"name": "typecheck", "command": "npx tsc --noEmit"})
+
+    # Python: ruff covers lint+format cheaply when declared.
+    if _marker_exists(workspace, "pyproject.toml", "ruff.toml", ".ruff.toml"):
+        checks.append({"name": "lint-python", "command": "ruff check ."})
+
+    # Rust / Go: compile-grade checks pick up most lint-level problems.
+    if _marker_exists(workspace, "Cargo.toml"):
+        checks.append({"name": "check-rust", "command": "cargo check"})
+    if _marker_exists(workspace, "go.mod"):
+        checks.append({"name": "vet-go", "command": "go vet ./..."})
+
+    return checks
+
+
 def verify_before_push(command: str, workspace: str, conversation_id: str = None) -> dict:
     """Run pre-PR verification checks.
 
@@ -97,11 +145,28 @@ def verify_before_push(command: str, workspace: str, conversation_id: str = None
     checks_config = config.get("checks", [])
 
     if not checks_config:
-        # Default checks: lint, typecheck
-        checks_config = [
-            {"name": "lint", "command": "npx eslint src/ --max-warnings 0"},
-            {"name": "typecheck", "command": "npx tsc --noEmit"},
-        ]
+        # Marker-gated defaults for this workspace's ecosystem(s); a
+        # workspace declaring nothing gets an empty list and every check
+        # reports as a non-failing skip below.
+        checks_config = default_checks(workspace)
+
+    if not checks_config:
+        # No ecosystem markers and no overrides: nothing this gate knows
+        # how to check here. Report that visibly and pass — an empty
+        # result list must not read as a silent gate bypass.
+        return {
+            "ran": True,
+            "all_passed": True,
+            "checks": [{
+                "name": "defaults",
+                "passed": True,
+                "output": "no recognized project markers (package.json / tsconfig.json / pyproject.toml / Cargo.toml / go.mod) and no .yaah/verify.json checks — nothing to verify",
+                "duration_ms": 0,
+            }],
+            "failed_checks": [],
+            "total_duration_ms": 0,
+            "command_intercepted": command,
+        }
 
     results = []
     for check in checks_config:

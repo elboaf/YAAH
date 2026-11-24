@@ -73,7 +73,6 @@ function screen_textarea(): HTMLElement {
 }
 
 describe('#1245 context refresh is generation-fenced', () => {
-  let fetchMock: ReturnType<typeof vi.spyOn>
   let currentScript = ''
 
   beforeEach(() => {
@@ -93,7 +92,7 @@ describe('#1245 context refresh is generation-fenced', () => {
       pendingPlanApprovals: {},
       contextByConv: {},
     })
-    fetchMock = vi.spyOn(window, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+    vi.spyOn(window, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
       const u = String(input)
       if (u.includes('/api/agent/')) return ndjsonResponse([currentScript])
       if (u.includes('/context')) {

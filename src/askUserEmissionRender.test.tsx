@@ -16,7 +16,7 @@
 //
 // Run: npx vitest run src/askUserEmissionRender.test.tsx
 import { describe, it, expect, beforeEach } from 'vitest'
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, cleanup } from '@testing-library/react'
 import { useAgent } from './store'
 import { MessageView } from './components'
 import type { StoredMessage } from './api'

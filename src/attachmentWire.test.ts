@@ -17,7 +17,7 @@ const sseBody = () => {
 
 describe('structured attachments on the wire (#142)', () => {
   it('streamAgentTurn sends the attachments array alongside images', async () => {
-    fetchMock.mockImplementation(async (_u: unknown, init?: RequestInit) => {
+    fetchMock.mockImplementation(async (_u: unknown, _init?: RequestInit) => {
       expect(String(_u)).toMatch(/\/api\/agent\/7$/)
       return new Response(sseBody(), { status: 200 })
     })
@@ -30,7 +30,7 @@ describe('structured attachments on the wire (#142)', () => {
   })
 
   it('queueMessage sends the attachments array', async () => {
-    fetchMock.mockImplementation(async (_u: unknown, init?: RequestInit) => {
+    fetchMock.mockImplementation(async (_u: unknown, _init?: RequestInit) => {
       expect(String(_u)).toMatch(/\/api\/agent\/7\/queue$/)
       return okJson({ ok: true, item: { id: 1, text: 'look', skills: [], images: [] } })
     })

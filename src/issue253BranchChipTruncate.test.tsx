@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen } from '@testing-library/react'
 
 const { listLocalWorkspaces, listWorkspaces, addWorkspace } = vi.hoisted(() => ({
   listLocalWorkspaces: vi.fn(),
@@ -61,11 +61,3 @@ describe('draft destination select layout (#253 remainder)', () => {
     expect(select.className).toContain('min-w-0')
   })
 })
-
-function useAgentState() {
-  useAgent.setState({
-    conversationId: null,
-    workspace: 'C:/repos/project',
-    draftDestination: null,
-  })
-}

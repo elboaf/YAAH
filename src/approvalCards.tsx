@@ -9,8 +9,10 @@ import { useAgent } from './store'
  * `color` keeps naming the role (orange=ask/gate, sky=plan) for callers and
  * for the accent-specific input/send treatments; the shell itself is hue-free.
  */
-export function ApprovalCardShell({ color, icon, title, sub, children, err }: {
-  color: 'orange' | 'sky'
+export function ApprovalCardShell({ icon, title, sub, children, err }: {
+  // `color` names the role (orange=ask/gate, sky=plan) for call sites; the
+  // shell itself is hue-free (kept out of the destructure — unused there).
+  color?: 'orange' | 'sky'
   icon: React.ReactNode
   title: string
   /** Faint mono suffix after the title (e.g. "#live · pick an answer"). */

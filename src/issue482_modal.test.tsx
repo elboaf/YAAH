@@ -1,7 +1,7 @@
 // Issue #482 (owner-reopened): open a NEW remote chat, send a message, the
 // running dots on the sidebar row must show while the modal is streaming.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor, act, fireEvent } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, fireEvent } from '@testing-library/react'
 
 const { getRemoteDeviceMessages, listRemoteDeviceConversations, streamRemoteTurn } = vi.hoisted(() => ({
   getRemoteDeviceMessages: vi.fn(), listRemoteDeviceConversations: vi.fn(), streamRemoteTurn: vi.fn(),
@@ -34,9 +34,7 @@ describe('issue #482: modal streaming populates sidebar row dots', () => {
     await screen.findByText('earlier')
     expect(useAgent.getState().activeRemoteKey).toBe(KEY)
 
-    let deliverEvent: ((ev: { type: string }) => void) | null = null
-    streamRemoteTurn.mockImplementation(((_h: string, _c: string, _m: string, _w: string, onEvent: (ev: { type: string }) => void) => {
-      deliverEvent = onEvent
+    streamRemoteTurn.mockImplementation(((_h: string, _c: string, _m: string, _w: string, _onEvent: (ev: { type: string }) => void) => {
       return new Promise(() => {})
     }))
     fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'go' } })

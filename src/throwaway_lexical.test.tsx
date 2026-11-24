@@ -25,7 +25,7 @@ describe('throwaway: input event', () => {
       onEvent({ type: 'text', text: 'Visible answer.' })
       onEvent({ type: 'done' })
     })
-    const { rerender } = render(<Composer />)
+    render(<Composer />)
     const box = screen.getByLabelText('Message the agent') as any
     const editor = box.__editor as any
 

@@ -15,7 +15,6 @@
 // moves an existing segment's start offset; every existing segment keeps
 // its key and its DOM node — and with it, the reader's selection.
 
-import type { ReactNode } from 'react'
 import type { ChatMessage, ToolCall } from './store'
 
 export interface EmissionSegment {
@@ -65,7 +64,7 @@ export function emissionSegments(msg: ChatMessage): EmissionSegment[] | null {
   const answered = calls.filter((t) => t.name === 'ask_user' && t.result !== undefined)
   // Legacy shape: answered asks exist but at least one has no recorded
   // offset — the caller's chronological/flat fallback handles those.
-  if (answered.length > 0 && answered.some((t) => typeof t.contentOffset !== 'number')) {
+  if (answered.some((t) => typeof t.contentOffset !== 'number')) {
     return null
   }
   const anchors = calls
