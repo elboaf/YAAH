@@ -2047,16 +2047,20 @@ async def _run_agent_claimed(
 
     # #439: the root user's typed words, resolved once per turn. The
     # wrapper hands them down for the normal paths; a caller that passed
-    # none (exotic resume shapes, direct harness callers) resolves the
-    # turn's root user message from the DB here - AFTER the persist above
-    # (or from the already-stored row when persist_user=False). The
-    # latest user row is the same corpus get_last_user_message serves;
-    # a resume replay's earlier rows are equally stale as a style
-    # corpus, and an empty-text turn stays empty (no match). Steer
-    # boundaries below re-resolve from the live queue when a steered
-    # message lands mid-run (#439 review).
-    turn_user_text = user_text or await get_last_user_message(
-        conversation_id
+    # none (direct harness callers) resolves the turn's root user message
+    # from the DB here - AFTER the persist above. A resume is different:
+    # the transport text is the sentinel "resume" and persist_user is
+    # False (the real request is already stored), so feeding "resume" here
+    # would overwrite the durable session goal with that sentinel (#848
+    # review). On resume resolve from the DB instead, where the stored root
+    # request lives. The latest user row is the same corpus
+    # get_last_user_message serves, and an empty-text turn stays empty (no
+    # match). Steer boundaries below re-resolve from the live queue when a
+    # steered message lands mid-run (#439 review).
+    turn_user_text = (
+        user_text
+        if persist_user and user_text
+        else await get_last_user_message(conversation_id)
     )
 
     # #844 Stage C: the post-turn completion verifier is opt-out (default on).
