@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.yaah.client.api.YaahClient
 import com.yaah.client.model.ConversationItem
+import com.yaah.client.util.Store
 import com.yaah.client.ui.YAAHTheme
 import kotlinx.coroutines.*
 
@@ -27,6 +28,7 @@ fun MainScreen() {
 
     if (showHostPicker) {
         HostPickerScreen(
+            context,
             scope = scope,
             onHostSelected = { host ->
                 selectedHost = host
@@ -62,13 +64,24 @@ data class HostEntry(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HostPickerScreen(
+    context: android.content.Context,
     scope: CoroutineScope,
     onHostSelected: (HostEntry) -> Unit
 ) {
-    var manualHost by remember { mutableStateOf("") }
-    var manualPassphrase by remember { mutableStateOf("") }
-    var connecting by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
+    val manualHostState = remember { mutableStateOf("") }
+    val manualPassphraseState = remember { mutableStateOf("") }
+    val connectingState = remember { mutableStateOf(false) }
+    val errorState = remember { mutableStateOf<String?>(null) }
+
+    // Restore saved connection settings so they survive app restarts.
+    LaunchedEffect(Unit) {
+        val (savedHost, savedPass) = Store.load(context)
+        if (savedHost.isNotBlank()) {
+            manualHostState.value = savedHost
+            manualPassphraseState.value = savedPass
+            connect(context, scope, savedHost, savedPass, connectingState, errorState, onHostSelected)
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -87,64 +100,77 @@ fun HostPickerScreen(
         Spacer(modifier = Modifier.height(16.dp))
 
         OutlinedTextField(
-            value = manualHost,
-            onValueChange = { manualHost = it },
+            value = manualHostState.value,
+            onValueChange = { manualHostState.value = it },
             placeholder = { Text("e.g., 192.168.1.100:8765") },
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(modifier = Modifier.height(8.dp))
 
         OutlinedTextField(
-            value = manualPassphrase,
-            onValueChange = { manualPassphrase = it },
+            value = manualPassphraseState.value,
+            onValueChange = { manualPassphraseState.value = it },
             placeholder = { Text("Passphrase (if required)") },
             modifier = Modifier.fillMaxWidth()
         )
 
-        if (error != null) {
+        if (errorState.value != null) {
             Spacer(modifier = Modifier.height(8.dp))
-            Text(error!!, color = MaterialTheme.colorScheme.error)
+            Text(errorState.value!!, color = MaterialTheme.colorScheme.error)
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
         Button(
             onClick = {
-                if (manualHost.isBlank()) return@Button
-                connecting = true
-                error = null
-
-                val host = if (manualHost.contains(":")) manualHost else "$manualHost:8765"
-                val client = YaahClient("http://$host/", manualPassphrase.ifBlank { null })
-
-                scope.launch(Dispatchers.IO) {
-                    try {
-                        val service = client.getService()
-                        val response = service.getHostInfo()
-                        if (response.isSuccessful) {
-                            withContext(Dispatchers.Main) {
-                                onHostSelected(HostEntry(host, "http://$host/", manualPassphrase.ifBlank { null }))
-                            }
-                        } else {
-                            withContext(Dispatchers.Main) {
-                                error = "Connection failed: ${response.code()}"
-                                connecting = false
-                            }
-                        }
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            error = "Connection error: ${e.message}"
-                            connecting = false
-                        }
-                    }
-                }
+                if (manualHostState.value.isBlank()) return@Button
+                val host = if (manualHostState.value.contains(":")) manualHostState.value else "$manualHostState.value:8765"
+                connect(context, scope, host, manualPassphraseState.value, connectingState, errorState, onHostSelected)
             },
-            enabled = !connecting
+            enabled = !connectingState.value
         ) {
-            if (connecting) {
+            if (connectingState.value) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp))
             } else {
                 Text("Connect")
+            }
+        }
+    }
+}
+
+/**
+ * Validate a host/passphrase over the network and persist them on success.
+ * Persists before switching screens so a restart reuses the same connection.
+ */
+private fun connect(
+    context: Context,
+    scope: CoroutineScope,
+    host: String,
+    passphrase: String,
+    connecting: androidx.compose.runtime.MutableState<Boolean>,
+    error: androidx.compose.runtime.MutableState<String?>,
+    onHostSelected: (HostEntry) -> Unit
+) {
+    connecting.value = true
+    scope.launch(Dispatchers.IO) {
+        val client = YaahClient("http://$host/", passphrase.ifBlank { null })
+        try {
+            val response = client.getService().getHostInfo()
+            if (response.isSuccessful) {
+                Store.save(context, host, passphrase)
+                withContext(Dispatchers.Main) {
+                    onHostSelected(HostEntry(host, "http://$host/", passphrase.ifBlank { null }))
+                }
+            } else {
+                withContext(Dispatchers.Main) {
+                    error.value = "Connection failed: ${response.code()}"
+                    connecting.value = false
+                }
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                error.value = "Connection error: ${e.message}"
+                connecting.value = false
             }
         }
     }
