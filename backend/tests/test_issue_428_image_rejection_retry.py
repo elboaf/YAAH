@@ -208,7 +208,11 @@ async def test_image_rejection_retries_textonly_and_survives(monkeypatch):
     config_mod.CONFIG_PATH.write_text(json.dumps(
         {"access_mode": "full",
          "providers": {"local": {"api_base": "http://local.test", "api_key": "", "model": "m"}},
-         "active_provider": "local"}
+         "active_provider": "local",
+         # #844: the post-turn completion verifier is a separate audit call
+         # orthogonal to the image-rejection retry this test targets; keep it
+         # off so the call/notes counts reflect only the turn + its retry.
+         "completion_verifier": False},
     ), encoding="utf-8")
 
     class FakeClient(httpx.AsyncClient):

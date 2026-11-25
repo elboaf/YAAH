@@ -2281,9 +2281,10 @@ async def _run_agent_claimed(
     # so the prefix cache stays byte-stable; a per-turn objective only costs a
     # tail re-prefill, like growing history.
     messages.extend(history)
-    # Only when the verifier is on: the objective tail is part of the #844
-    # loop, so an off verifier must leave the prompt byte-identical to before.
-    if completion_verifier_enabled:
+    # Only when the verifier is on AND history is replayed: the objective
+    # tail is part of the #844 loop, so an off verifier (or a memory-off,
+    # fresh-context run) must leave the prompt byte-identical to before.
+    if completion_verifier_enabled and include_history:
         _objective_tail = goal_mod.objective_tail_message(session_goal)
         if _objective_tail:
             messages.append(_objective_tail)
