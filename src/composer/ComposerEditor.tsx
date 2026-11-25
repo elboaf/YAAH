@@ -142,13 +142,44 @@ const ComposerInner = ({
       }
       root.append(paragraph)
 
-      // Restore the caret: the rebuilt content's first leaf is the new focus.
-      // Select it at the recorded offset so later input lands after the token.
-      const leaf = paragraph.getFirstChild()
-      if (leaf) {
+      // Restore the caret at the recorded text offset. Chips are atomic inline
+      // nodes with no text children, so a text-side Point cannot live inside
+      // one — applying such a Point throws (`selectionTransform is not a
+      // function`). Walk the rebuilt children and place the caret on the node
+      // that actually holds the offset: inside a text node by text offset, or
+      // on the paragraph at the child boundary after a chip, so later input
+      // lands after the token rather than inside the chip.
+      const children = paragraph.getChildren()
+      let offset = 0
+      let caretSet = false
+      for (let i = 0; i < children.length; i++) {
+        const child = children[i]
+        const childTextLen = $isTextNode(child)
+          ? child.getTextContent().length
+          : child instanceof SkillChipNode
+            ? child.getSerializedToken().length
+            : 0
+        if (offset + childTextLen >= caretOffset) {
+          const sel = $createRangeSelection()
+          if ($isTextNode(child)) {
+            sel.anchor = $createPoint(child.getKey(), caretOffset - offset, 'text')
+            sel.focus = sel.anchor
+          } else {
+            // Atomic chip: caret goes after it, anchored on the parent.
+            sel.anchor = $createPoint(paragraph.getKey(), i + 1, 'element')
+            sel.focus = sel.anchor
+          }
+          $setSelection(sel)
+          caretSet = true
+          break
+        }
+        offset += childTextLen
+      }
+      if (!caretSet) {
+        // Caret is past all content: place it at the end of the paragraph.
         const sel = $createRangeSelection()
-        sel.anchor = $createPoint(leaf.getKey(), caretOffset, 'text')
-        sel.focus = $createPoint(leaf.getKey(), caretOffset, 'text')
+        sel.anchor = $createPoint(paragraph.getKey(), children.length, 'element')
+        sel.focus = sel.anchor
         $setSelection(sel)
       }
     })

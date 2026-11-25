@@ -173,6 +173,23 @@ describe('coderabbit fix round PR #819', () => {
         { timeout: 1000 },
       )
 
+      // The caret must land AFTER the chip — anchored on the paragraph as an
+      // element point, not as a text point inside the atomic chip (which is
+      // what threw `selectionTransform is not a function` before the fix).
+      // Later input therefore appends after the token, not inside the chip.
+      await waitFor(
+        () => {
+          if (!editor) return
+          const selection = (editor.getEditorState() as any)._selection
+          expect(selection).not.toBeNull()
+          // Element-type point on the paragraph, offset = child index.
+          expect(selection.anchor.type).toBe('element')
+          // The paragraph holds one child (the chip); the caret sits after it.
+          expect(selection.anchor.offset).toBe(1)
+        },
+        { timeout: 1000 },
+      )
+
     })
   })
 })
