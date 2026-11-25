@@ -434,6 +434,210 @@ async def test_spawn_batch_empty_prompt(fake_model, tmp_path):
     assert "error" in results["c0"]
 
 
+# ---------------------------------------------------------------- #550 hang
+
+
+class _SlowStream:
+    """A stream that never yields its first byte: the model call is silent.
+
+    The watchdog fires after SUB_AGENT_NO_FIRST_BYTE_TIMEOUT and the sub is
+    surfaced as hung, not left pulsing 'running' for up to CHAT_READ_TIMEOUT.
+    It blocks indefinitely on __anext__ so the consume task never completes
+    on its own.
+    """
+
+    def __init__(self):
+        pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(3600.0)  # never yields a first byte
+        raise StopAsyncIteration
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_no_first_byte_is_hung(tmp_path, monkeypatch):
+    # No first byte ever: a provider that accepts the connection and hangs.
+    async def fake_chat(*a, **k):
+        return _SlowStream()
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    monkeypatch.setattr(
+        subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 0.05
+    )
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "find issues", str(tmp_path)
+    )
+    assert result["status"] == "hung"
+    assert "no response" in result["output"]
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_first_byte_after_delay_completes(tmp_path, monkeypatch):
+    # First byte arrives after the window but before cancellation takes
+    # effect: the watchdog's early-exit event means the sub completes
+    # normally. A slow-but-live provider is never misclassified as hung.
+    monkeypatch.setattr(
+        subagents.model_client,
+        "chat",
+        lambda *a, **k: _stream_coro([{"type": "content", "text": "done"}]),
+    )
+    monkeypatch.setattr(
+        subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 0.05
+    )
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "do it", str(tmp_path)
+    )
+    assert result["status"] == "completed"
+    assert result["output"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_unknown_cost_stays_unknown(tmp_path, monkeypatch):
+    # A provider that returns content + finish but no usage.cost must leave
+    # cost_spent omitted (unknown), not collapsed to a known zero. This is the
+    # distinction the UI reads: absent cost_spent == unknown, cost_spent: 0.0
+    # == known zero.
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 5.0)
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return FakeStream([
+            {"type": "content", "text": "done"},
+            {"type": "finish"},
+        ])
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "do it", str(tmp_path)
+    )
+    assert result["status"] == "completed"
+    assert result["output"] == "done"
+    assert "cost_spent" not in result
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_explicit_zero_cost_preserved(tmp_path, monkeypatch):
+    # An explicitly reported zero cost must survive as cost_spent: 0.0 (known),
+    # distinct from the unknown case above.
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 5.0)
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return FakeStream([
+            {"type": "content", "text": "done"},
+            {"type": "usage", "usage": {"cost": 0.0, "completion_tokens": 0}},
+            {"type": "finish"},
+        ])
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "do it", str(tmp_path)
+    )
+    assert result["status"] == "completed"
+    assert result["cost_spent"] == 0.0
+
+
+class _YieldingStream:
+    """A stream that yields to the loop between chunks, like a real SSE
+    provider (each chunk is a separate network read). This is what exposes
+    the watchdog truncation bug: a non-yielding stream consumes in one shot
+    and never trips the early-exit path."""
+
+    def __init__(self, events):
+        self._events = list(events)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._events:
+            raise StopAsyncIteration
+        await asyncio.sleep(0.02)
+        return self._events.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_multi_chunk_stream_not_truncated(tmp_path, monkeypatch):
+    # A stream that keeps producing well within the window must complete with
+    # ALL content preserved -- the watchdog must never cancel it just because
+    # the first byte arrived.
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 5.0)
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return _YieldingStream([
+            {"type": "content", "text": "alpha"},
+            {"type": "content", "text": "beta"},
+            {"type": "content", "text": "gamma"},
+            {"type": "finish"},
+        ])
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "go", str(tmp_path)
+    )
+    assert result["status"] == "completed", result
+    assert result["output"] == "alphabeta" + "gamma", result["output"]
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_grace_turn_hang_is_surfaced(tmp_path, monkeypatch):
+    # A sub that burns its whole turn budget on tool calls then hangs on the
+    # final grace call must surface "hung" -- the grace call gets the same
+    # first-byte watchdog protection as every other turn.
+    agent = subagents.get_agent_def("explore")
+    monkeypatch.setattr(agent, "max_turns", 1)
+
+    state = {"n": 0}
+
+    async def fake_chat(messages, tools=None, stream=True):
+        state["n"] += 1
+        if state["n"] == 1:
+            # Turn 0: a tool call so the loop exhausts and fires the grace turn.
+            return FakeStream([
+                {"type": "tool_calls", "tool_calls": [{
+                    "id": "g1", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }]},
+                {"type": "finish", "reason": "tool_calls"},
+            ])
+        # Grace turn: never yields a first byte.
+        return _SlowStream()
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 0.05)
+    result = await subagents.run_sub_agent(
+        agent, "go", str(tmp_path)
+    )
+    assert result["status"] == "hung", result
+    assert "no response" in result["output"]
+
+
+async def _stream_coro(events):
+    class _S:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not events:
+                raise StopAsyncIteration
+            return events.pop(0)
+
+    return _S()
+
+
+async def _slow_stream_coro(delay):
+    class _S:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(delay)
+            raise StopAsyncIteration
+
+    return _S()
+
+
 # ---------------------------------------------------------------- loop integration
 
 
