@@ -11,11 +11,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.yaah.client.api.YaahClient
 import com.yaah.client.model.ConversationDetails
-import com.yaah.client.model.MessageItem
-import java.util.concurrent.CompletableFuture
+import kotlinx.coroutines.*
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationDetailScreen(
+    scope: CoroutineScope,
     convId: String,
     workspaceId: String,
     host: HostEntry,
@@ -26,7 +27,7 @@ fun ConversationDetailScreen(
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(convId) {
-        refreshDetails(host, convId, { details = it }, { loading = false }, { error = it })
+        loadDetails(scope, host, convId, { details = it }, { loading = false }, { error = it })
     }
 
     Scaffold(
@@ -55,7 +56,11 @@ fun ConversationDetailScreen(
             ) {
                 Text("Error: $error")
                 Spacer(modifier = Modifier.height(16.dp))
-                Button(onClick = { refreshDetails(host, convId, { details = it }, { }, { error = it }) }) {
+                Button(onClick = {
+                    scope.launch {
+                        loadDetails(scope, host, convId, { details = it }, { }, { error = it })
+                    }
+                }) {
                     Text("Retry")
                 }
             }
@@ -75,21 +80,27 @@ fun ConversationDetailScreen(
     }
 }
 
-fun refreshDetails(
+suspend fun loadDetails(
+    scope: CoroutineScope,
     host: HostEntry,
     convId: String,
     onLoaded: (ConversationDetails) -> Unit,
     onDone: () -> Unit,
     onError: (String) -> Unit
 ) {
-    val client = YaahClient(host.baseUrl, null)
-    CompletableFuture.supplyAsync {
-        client.getService().getConversationSnapshot(convId).body()
-    }.thenAccept { det ->
-        if (det != null) onLoaded(det)
-        onDone()
-    }.exceptionally {
-        onError(it.message ?: "Unknown error")
-        CompletableFuture.completedFuture(null)
+    try {
+        val client = YaahClient(host.baseUrl, host.passphrase)
+        val service = client.getService()
+        withContext(Dispatchers.IO) {
+            val response = service.getConversationSnapshot(convId)
+            if (response.isSuccessful && response.body() != null) {
+                onLoaded(response.body()!!)
+            } else {
+                onError("Failed: ${response.code()}")
+            }
+        }
+    } catch (e: Exception) {
+        onError(e.message ?: "Unknown error")
     }
+    onDone()
 }

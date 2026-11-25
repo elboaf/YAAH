@@ -11,19 +11,22 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.yaah.client.api.YaahClient
 import com.yaah.client.model.ConversationItem
-import java.util.concurrent.CompletableFuture
+import kotlinx.coroutines.*
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationListScreen(
+    scope: CoroutineScope,
     host: HostEntry,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onConversationSelected: (ConversationItem) -> Unit
 ) {
     var conversations by remember { mutableStateOf<List<ConversationItem>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(host) {
-        refreshConversations(host, { conversations = it }, { loading = false }, { error = it })
+        loadConversations(scope, host, { conversations = it }, { loading = false }, { error = it })
     }
 
     Scaffold(
@@ -52,7 +55,11 @@ fun ConversationListScreen(
             ) {
                 Text("Error: $error")
                 Spacer(modifier = Modifier.height(16.dp))
-                Button(onClick = { refreshConversations(host, { conversations = it }, { }, { error = it }) }) {
+                Button(onClick = {
+                    scope.launch {
+                        loadConversations(scope, host, { conversations = it }, { }, { error = it })
+                    }
+                }) {
                     Text("Retry")
                 }
             }
@@ -62,27 +69,33 @@ fun ConversationListScreen(
                 contentPadding = PaddingValues(8.dp)
             ) {
                 items(conversations) { conv ->
-                    ConversationRow(conv)
+                    ConversationRow(conv, onClick = { onConversationSelected(conv) })
                 }
             }
         }
     }
 }
 
-fun refreshConversations(
+suspend fun loadConversations(
+    scope: CoroutineScope,
     host: HostEntry,
     onLoaded: (List<ConversationItem>) -> Unit,
     onDone: () -> Unit,
     onError: (String) -> Unit
 ) {
-    val client = YaahClient(host.baseUrl, null)
-    CompletableFuture.supplyAsync {
-        client.getService().listConversations().body()
-    }.thenAccept { convs ->
-        if (convs != null) onLoaded(convs)
-        onDone()
-    }.exceptionally {
-        onError(it.message ?: "Unknown error")
-        CompletableFuture.completedFuture(null)
+    try {
+        val client = YaahClient(host.baseUrl, host.passphrase)
+        val service = client.getService()
+        withContext(Dispatchers.IO) {
+            val response = service.listConversations()
+            if (response.isSuccessful && response.body() != null) {
+                onLoaded(response.body()!!)
+            } else {
+                onError("Failed: ${response.code()}")
+            }
+        }
+    } catch (e: Exception) {
+        onError(e.message ?: "Unknown error")
     }
+    onDone()
 }

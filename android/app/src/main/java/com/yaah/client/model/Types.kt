@@ -10,14 +10,17 @@ data class HostInfo(
 )
 
 data class ConversationItem(
-    val conversation_id: String,
-    val workspace_id: String,
-    val workspace_name: String,
+    val id: Int,
     val title: String,
-    val chat_type: String,
-    val last_message_at: String,
-    val revision: Int,
-    val pinned: Boolean = false
+    val workspace: String?,
+    val created_at: String?,
+    val updated_at: String?,
+    val chat_type: String?,
+    val model: String?,
+    val effort: String?,
+    val revision: String?,
+    val cost_spent: Double? = null,
+    val completion_tokens_total: Int? = null
 )
 
 data class ConversationDetails(
@@ -25,11 +28,22 @@ data class ConversationDetails(
     val workspace_id: String,
     val title: String,
     val chat_type: String,
-    val revision: Int,
+    val revision: String,
     val messages: List<MessageItem>,
     val running_agent: Boolean = false,
     val running_agent_pid: Int? = null,
     val running_agent_task: String? = null
+)
+
+data class ToolCallItem(
+    val id: String,
+    val type: String,
+    val function: FunctionCallItem
+)
+
+data class FunctionCallItem(
+    val name: String,
+    val arguments: String
 )
 
 data class MessageItem(
@@ -37,17 +51,17 @@ data class MessageItem(
     val role: String,
     val content: String,
     val created_at: String,
-    val tool_calls: List<Map<String, String>>? = null
+    val tool_calls: List<ToolCallItem>? = null
 )
 
 data class LeaseRequest(
-    val revision: Int,
+    val revision: String,
     val holder_id: String
 )
 
 data class LeaseResponse(
     val lease_token: String,
-    val revision: Int
+    val revision: String
 )
 
 data class TurnRequest(

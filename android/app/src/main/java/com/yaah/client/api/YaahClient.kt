@@ -8,14 +8,10 @@ import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
-class YaahClient(private val baseUrl: String, private var passphrase: String?) {
-    private var retrofit: Retrofit
+class YaahClient(baseUrl: String, private var passphrase: String?) {
+    private val retrofit: Retrofit
 
     init {
-        setupRetrofit()
-    }
-
-    private fun setupRetrofit() {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.BODY
         }
@@ -47,16 +43,5 @@ class YaahClient(private val baseUrl: String, private var passphrase: String?) {
 
     fun updatePassphrase(newPassphrase: String?) {
         passphrase = newPassphrase
-        setupRetrofit()
-    }
-
-    suspend fun testConnection(): Boolean {
-        try {
-            val service = getService()
-            val response = service.getHostInfo()
-            return response.isSuccessful
-        } catch (e: Exception) {
-            return false
-        }
     }
 }

@@ -3,6 +3,8 @@ package com.yaah.client.ui.screens
 import android.content.Context
 import android.net.Uri
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -12,16 +14,20 @@ import androidx.compose.ui.unit.dp
 import com.yaah.client.api.YaahClient
 import com.yaah.client.model.ConversationItem
 import com.yaah.client.ui.YAAHTheme
-import java.util.concurrent.CompletableFuture
+import kotlinx.coroutines.*
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var showHostPicker by remember { mutableStateOf(true) }
     var selectedHost by remember { mutableStateOf<HostEntry?>(null) }
+    var selectedConversation by remember { mutableStateOf<ConversationItem?>(null) }
 
     if (showHostPicker) {
         HostPickerScreen(
+            scope = scope,
             onHostSelected = { host ->
                 selectedHost = host
                 showHostPicker = false
@@ -29,19 +35,34 @@ fun MainScreen() {
         )
     } else {
         ConversationListScreen(
+            scope = scope,
             host = selectedHost!!,
-            onBack = { showHostPicker = true }
+            onBack = { showHostPicker = true },
+            onConversationSelected = { conv -> selectedConversation = conv }
+        )
+    }
+
+    if (selectedConversation != null && selectedHost != null) {
+        ConversationDetailScreen(
+            scope = scope,
+            convId = selectedConversation!!.id.toString(),
+            workspaceId = "",
+            host = selectedHost!!,
+            onBack = { selectedConversation = null }
         )
     }
 }
 
 data class HostEntry(
     val name: String,
-    val baseUrl: String
+    val baseUrl: String,
+    val passphrase: String?
 )
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HostPickerScreen(
+    scope: CoroutineScope,
     onHostSelected: (HostEntry) -> Unit
 ) {
     var manualHost by remember { mutableStateOf("") }
@@ -96,18 +117,26 @@ fun HostPickerScreen(
                 val host = if (manualHost.contains(":")) manualHost else "$manualHost:8765"
                 val client = YaahClient("http://$host/", manualPassphrase.ifBlank { null })
 
-                CompletableFuture.supplyAsync {
-                    client.testConnection()
-                }.thenAccept { success ->
-                    if (success) {
-                        onHostSelected(HostEntry(host, "http://$host/"))
-                    } else {
-                        error = "Failed to connect. Check IP, port, and passphrase."
-                        connecting = false
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        val service = client.getService()
+                        val response = service.getHostInfo()
+                        if (response.isSuccessful) {
+                            withContext(Dispatchers.Main) {
+                                onHostSelected(HostEntry(host, "http://$host/", manualPassphrase.ifBlank { null }))
+                            }
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                error = "Connection failed: ${response.code()}"
+                                connecting = false
+                            }
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            error = "Connection error: ${e.message}"
+                            connecting = false
+                        }
                     }
-                }.exceptionally {
-                    error = "Connection error: ${it.message}"
-                    CompletableFuture.completedFuture(null)
                 }
             },
             enabled = !connecting
