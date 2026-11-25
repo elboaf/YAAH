@@ -265,4 +265,11 @@ async def run_completion_verifier(
     if not isinstance(content, str):
         return infra_error("verifier response had no message content")
 
-    return parse_verification_result(content)
+    result = parse_verification_result(content)
+    # Expose the billed call's usage alongside the verdict so the loop can
+    # record the verifier's spend in the conversation total (#848). Infra-
+    #-error sentinels returned above carry no usage.
+    usage = data.get("usage")
+    if usage:
+        result["usage"] = usage
+    return result

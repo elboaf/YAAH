@@ -175,24 +175,78 @@ def _build_verifier_transcript(
 
     Skips the (huge) frozen system prompt and takes only the turn's tail, so
     the verifier never sees the whole history and the call stays cheap. Tool
-    results are the primary evidence and are rendered with their call name.
+    calls and their results are the primary evidence, so each assistant tool
+    call is rendered with its function name and serialized arguments, and
+    each result is paired back to the call it answers (by tool_call_id) with
+    the operation name on the result line.
     """
     parts: list[str] = []
     tail = messages[-limit:] if len(messages) > limit else messages
+    # Index tool-call id -> operation name so a result can name the call it
+    # answers: the replayed tool row carries only tool_call_id, not the name.
+    call_names: dict[str, str] = {}
+    for m in tail:
+        tcs = m.get("tool_calls")
+        if isinstance(tcs, list):
+            for tc in tcs:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                call_names.setdefault(tc.get("id", ""), fn.get("name", ""))
     for m in tail:
         role = m.get("role")
         if role == "system":
             continue
         content = m.get("content")
-        if role == "tool":
-            parts.append(f"[tool result] {_tool_content_text(content)}")
-        elif role == "assistant":
+        if role == "assistant":
             parts.append(f"[assistant] {_tool_content_text(content)}")
+            for tc in (m.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                # Arguments arrive serialized; a structured dict/list still
+                # round-trips through json so the transcript stays text.
+                if isinstance(args, (dict, list)):
+                    args = json.dumps(args)
+                elif not isinstance(args, str):
+                    args = "" if args is None else str(args)
+                parts.append(f"[tool call: {fn.get('name', '')} {args}]")
+        elif role == "tool":
+            name = call_names.get(m.get("tool_call_id", ""), "")
+            tag = f"[tool result: {name}]" if name else "[tool result]"
+            parts.append(f"{tag} {_tool_content_text(content)}")
         else:
             parts.append(f"[{role}] {_tool_content_text(content)}")
     if assistant_content:
         parts.append(f"[assistant] {assistant_content}")
     return "\n".join(parts)
+
+
+async def _record_call_usage(
+    conversation_id: int, usage: dict | None
+) -> None:
+    """Record one billed model call's cost + completion tokens (#1245: the
+    provider bills at the usage chunk, so record at the point of billing).
+
+    Shared by the turn's per-call writes and the post-turn verifier call, so
+    both spend lands in the same conversation total. Best-effort: a failed
+    write must never fail the call. Empty usage is a no-op; a non-numeric
+    cost falls back to a tokens-only write, mirroring the main path."""
+    if not usage:
+        return
+    cost = usage.get("cost")
+    if cost is not None:
+        try:
+            cost = float(cost)
+        except (TypeError, ValueError):
+            cost = None
+    tokens = int(usage.get("completion_tokens", 0) or 0)
+    if cost is not None or tokens:
+        try:
+            await add_conversation_cost(conversation_id, cost, tokens)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _is_conversational_reply(title: str) -> bool:
@@ -2588,26 +2642,11 @@ async def _run_agent_claimed(
                         # (cancelled, errored, budget-exhausted) keeps its
                         # cost in the DB. add_conversation_cost is an
                         # atomic increment, so per-call writes sum correctly.
-                        _u = ev.get("usage") or {}
-                        _call_cost = _u.get("cost")
-                        if _call_cost is not None:
-                            try:
-                                _call_cost = float(_call_cost)
-                            except (TypeError, ValueError):
-                                _call_cost = None
-                        if _call_cost is not None or (
-                            _u.get("completion_tokens", 0) or 0
-                        ):
-                            try:
-                                await add_conversation_cost(
-                                    conversation_id,
-                                    _call_cost,
-                                    int(_u.get("completion_tokens", 0) or 0),
-                                )
-                            except Exception:  # noqa: BLE001
-                                # Best-effort: cost tracking must not fail
-                                # the call.
-                                pass
+                        # Reused by the post-turn verifier call (#848), so a
+                        # turn's and its audit's spend land in the same total.
+                        await _record_call_usage(
+                            conversation_id, ev.get("usage") or {}
+                        )
                 # Flush ordinary text at EOF, but never expose a possible
                 # partial opener or an unterminated briefing.
                 if tail and not say_open:
@@ -2903,6 +2942,13 @@ async def _run_agent_claimed(
                         ),
                         cancel_ev,
                     )
+                    # #848: the verifier is a real billed model call; record its
+                    # spend once, alongside the turn's other usage. Infra-error
+                    # responses carry no usage and are skipped.
+                    if not _verdict.get("error"):
+                        await _record_call_usage(
+                            conversation_id, _verdict.get("usage")
+                        )
                     if not _verdict.get("error") and not _verdict.get("passed"):
                         yield _ndjson(
                             {

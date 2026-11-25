@@ -310,3 +310,104 @@ async def test_whitespace_prompt_clears_persisted_goal(tmp_path, monkeypatch):
     assert (await get_conversation(cid))["session_goal"] is None, (
         "an empty prompt must clear the durable goal to NULL"
     )
+
+
+# ---------------------------------------------------------------------------
+# #848 review follow-ups
+# ---------------------------------------------------------------------------
+
+
+def test_verifier_transcript_shows_tool_calls_and_links_results():
+    """The verifier audits tool work, so the transcript renders each
+    assistant tool call with its name and serialized arguments, and pairs
+    each result back to the call it answers by tool_call_id (#848 review)."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": "calling the tool",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": '{"command": "echo hi"}',
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "hi"},
+    ]
+    t = loop._build_verifier_transcript(messages, "")
+    assert "[tool call: bash {\"command\": \"echo hi\"}]" in t
+    assert "[tool result: bash]" in t
+    assert "hi" in t
+
+
+@pytest.mark.asyncio
+async def test_verifier_usage_recorded_in_cost_total(tmp_path, monkeypatch):
+    """The verifier is a real billed call: its provider usage is recorded in
+    the conversation cost total, once (#848 review)."""
+    from backend.db import database
+
+    cid = await database.create_conversation("usage me")
+    ws = str(tmp_path)
+
+    async def fake_chat(messages, tools=None, stream=True, **kw):
+        if not stream:
+            # verifier call: pass, with billed usage
+            return {
+                "choices": [{"message": {"content": json.dumps(
+                    {"passed": True, "reason": "done", "nextAction": ""})}}],
+                "usage": {"cost": 0.01, "completion_tokens": 42},
+            }
+        # turn call: finishes with no usage of its own
+        return FakeStream([{"type": "content", "text": "done"},
+                           {"type": "finish"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+
+    captured = []
+
+    async def _capture(conversation_id, cost, completion_tokens):
+        captured.append((conversation_id, cost, completion_tokens))
+
+    monkeypatch.setattr(loop, "add_conversation_cost", _capture)
+
+    events = await collect(loop.run_agent(cid, "Fix bug A", ws))
+    assert [e["type"] for e in events].count("done") == 1
+    # The turn contributed no usage, so the only recorded spend is the
+    # verifier's.
+    assert captured == [(cid, 0.01, 42)]
+
+
+@pytest.mark.asyncio
+async def test_verifier_infra_error_records_no_usage(tmp_path, monkeypatch):
+    """An infra-error verifier response carries no usage and must not record
+    any spend (#848 review)."""
+    from backend.db import database
+
+    cid = await database.create_conversation("usage me")
+    ws = str(tmp_path)
+
+    async def fake_chat(messages, tools=None, stream=True, **kw):
+        if not stream:
+            # verifier: infra error, no usage
+            return {"error": True, "reason": "boom"}
+        return FakeStream([{"type": "content", "text": "done"},
+                           {"type": "finish"}])
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+
+    captured = []
+
+    async def _capture(conversation_id, cost, completion_tokens):
+        captured.append((conversation_id, cost, completion_tokens))
+
+    monkeypatch.setattr(loop, "add_conversation_cost", _capture)
+
+    events = await collect(loop.run_agent(cid, "Fix bug A", ws))
+    assert [e["type"] for e in events].count("done") == 1
+    # The turn contributed no usage and the infra-error verifier recorded
+    # none.
+    assert captured == []
