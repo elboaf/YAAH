@@ -74,6 +74,7 @@ def static_provider(monkeypatch):
             },
             "model": "local-model",
             "reasoning_effort": "",
+            "completion_verifier": False,
         },
     )
 
@@ -165,6 +166,7 @@ async def test_flag_off_is_now_noop_static_always_on(monkeypatch, tmp_path):
             },
             "model": "local-model",
             "reasoning_effort": "",
+            "completion_verifier": False,
         },
     )
     chat = HeadCapture()
@@ -248,6 +250,7 @@ async def test_frozen_head_replays_without_provider_flag_yet_frozen(
             },
             "model": "local-model",
             "reasoning_effort": "",
+            "completion_verifier": False,
         }
 
     monkeypatch.setattr(agent_loop, "load_config", config_with_flag)
@@ -320,6 +323,7 @@ async def test_override_routes_static_decision_to_target_provider(
             },
             "model": "gpt-4o",
             "reasoning_effort": "",
+            "completion_verifier": False,
         },
     )
     chat = HeadCapture()
@@ -568,6 +572,7 @@ async def test_nonstatic_mode_writes_no_persisted_tail(
             },
             "model": "local-model",
             "reasoning_effort": "",
+            "completion_verifier": False,
         },
     )
     calls: list[list] = []

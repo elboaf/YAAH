@@ -187,9 +187,9 @@ def _build_verifier_transcript(
         if role == "tool":
             parts.append(f"[tool result] {_tool_content_text(content)}")
         elif role == "assistant":
-            parts.append(f"[assistant] {content}")
+            parts.append(f"[assistant] {_tool_content_text(content)}")
         else:
-            parts.append(f"[{role}] {content}")
+            parts.append(f"[{role}] {_tool_content_text(content)}")
     if assistant_content:
         parts.append(f"[assistant] {assistant_content}")
     return "\n".join(parts)
@@ -2059,6 +2059,14 @@ async def _run_agent_claimed(
         conversation_id
     )
 
+    # #844 Stage C: the post-turn completion verifier is opt-out (default on).
+    # Read early here — the durable objective's tail injection (objective_tail,
+    # below) is gated on this, so an off verifier leaves the prompt byte-identical
+    # to the pre-#844 shape.
+    completion_verifier_enabled = bool(
+        load_config().get("completion_verifier", True)
+    )
+
     # #844: the durable session objective. Persist the root prompt so it
     # survives session restart and is re-injected into every turn's context
     # (objective_tail_message, below). Each new prompt resets it to the new
@@ -2070,7 +2078,11 @@ async def _run_agent_claimed(
         await update_conversation(
             conversation_id,
             touch_updated_at=False,
-            session_goal=session_goal or None,
+            # Pass the (possibly empty) string directly: update_conversation
+            # drops None-valued fields, so `session_goal or None` would leave a
+            # stale goal in place when the user sends an empty prompt. An empty
+            # string reaches the write boundary and is normalised to NULL there.
+            session_goal=session_goal,
         )
     except Exception:  # noqa: BLE001 — the objective is an anchor, not a gate
         log.warning("session_goal_write_failed")
@@ -2269,9 +2281,12 @@ async def _run_agent_claimed(
     # so the prefix cache stays byte-stable; a per-turn objective only costs a
     # tail re-prefill, like growing history.
     messages.extend(history)
-    _objective_tail = goal_mod.objective_tail_message(session_goal)
-    if _objective_tail:
-        messages.append(_objective_tail)
+    # Only when the verifier is on: the objective tail is part of the #844
+    # loop, so an off verifier must leave the prompt byte-identical to before.
+    if completion_verifier_enabled:
+        _objective_tail = goal_mod.objective_tail_message(session_goal)
+        if _objective_tail:
+            messages.append(_objective_tail)
     # Static mode, freeze turn: persist the head exactly as this turn's
     # model call sends it, alongside the workspace it was built under, awaited
     # inline so a race with the NEXT turn's read is impossible (a detached
@@ -2357,9 +2372,8 @@ async def _run_agent_claimed(
 
     # #844 Stage C: the post-turn completion verifier is opt-out (default on).
     # When off, the loop behaves exactly as before — no verifier call.
-    completion_verifier_enabled = bool(
-        load_config().get("completion_verifier", True)
-    )
+    # (Read above, alongside the durable objective, so the objective-tail
+    # injection can be gated on it.)
 
     # Image-strip state for the mid-turn rebuild: the note the proactive
     # vision probe / #428 retry merged into the head (None = no strip ran).
@@ -2836,12 +2850,53 @@ async def _run_agent_claimed(
                 # loop, re-feeding it as a steering nudge (ycode #4). The loop
                 # is bounded by max_steps. A verifier infra error fails OPEN
                 # (the turn completes) so a flaky provider never wedges it.
-                if completion_verifier_enabled and session_goal:
-                    _verdict = await verify.run_completion_verifier(
-                        session_goal,
-                        _build_verifier_transcript(messages, assistant_content),
+                # (The per-model-call `usage` emission above already covered
+                # the turn's final call — this spot used to re-emit it.)
+                # Issue #557: checkpoint the just-finished prefix as
+                # this conversation's single slot-cache bin (the persona's
+                # BASE was already banked at the gate's bootstrap) - BEFORE the
+                # auxiliary completions below (verifier, then title), each of
+                # which would otherwise overwrite slot 0's content ahead of the
+                # save and wedge the prefix cache on the next gate restore.
+                # Run before the verifier so the bin holds the clean
+                # conversation prefix, not the verifier's prompt. Awaited
+                # INLINE - the next turn's gate must observe the post-save
+                # fingerprint; a detached save would race a fast follow-up
+                # turn. Runs on every natural stop (each verifier-loop
+                # iteration too), so the bin is refreshed before each auxiliary
+                # call. Best-effort: failures log, the turn still completes.
+                if include_history:
+                    await slotcache.flush(
                         model=model_override,
                         effort=effort_override,
+                        conversation_id=conversation_id,
+                        system_prompt=system_prompt,
+                        usage=state.get("usage"),
+                        tools=tools,
+                    )
+                # #844 Stage C: gate completion on the post-turn verifier. The
+                # model marks its own stop (no more tool calls); the verifier
+                # independently audits the durable objective against real
+                # evidence (ycode #2/#3). On failure we do NOT emit done — we
+                # surface the verifier's nextAction as the iteration title and
+                # loop, re-feeding it as a steering nudge (ycode #4). The loop
+                # is bounded by max_steps. A verifier infra error fails OPEN
+                # (the turn completes) so a flaky provider never wedges it.
+                # Raced against cancel_ev (issue #389) so a Stop cuts the
+                # in-flight audit instead of blocking on it.
+                if completion_verifier_enabled and session_goal:
+                    _verdict = await _race_model_call(
+                        asyncio.create_task(
+                            verify.run_completion_verifier(
+                                session_goal,
+                                _build_verifier_transcript(
+                                    messages, assistant_content
+                                ),
+                                model=model_override,
+                                effort=effort_override,
+                            )
+                        ),
+                        cancel_ev,
                     )
                     if not _verdict.get("error") and not _verdict.get("passed"):
                         yield _ndjson(
@@ -2871,26 +2926,6 @@ async def _run_agent_claimed(
                             }
                         )
                         continue
-                # (The per-model-call `usage` emission above already covered
-                # the turn's final call — this spot used to re-emit it.)
-                # Issue #557: checkpoint the just-finished prefix as
-                # this conversation's single slot-cache bin (the persona's
-                # BASE was already banked at the gate's bootstrap) - BEFORE
-                # the title call below, an auxiliary completion that would
-                # overwrite the slot's content (and possibly swap
-                # children) ahead of the save. Awaited INLINE - the next
-                # turn's gate must observe the post-save fingerprint; a
-                # detached save would race a fast follow-up turn.
-                # Best-effort: failures log, the turn still completes.
-                if include_history:
-                    await slotcache.flush(
-                        model=model_override,
-                        effort=effort_override,
-                        conversation_id=conversation_id,
-                        system_prompt=system_prompt,
-                        usage=state.get("usage"),
-                        tools=tools,
-                    )
 
                 # Replace the mechanical first-message title after a successful
                 # turn. Failures are silent/best-effort; the sidebar receives

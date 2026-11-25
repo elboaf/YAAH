@@ -2638,6 +2638,10 @@ export function RemoteTranscriptDialog({
         })
         if (nextId) asstId = nextId
         else {
+          // Guard failed (last row wasn't an assistant emission): still
+          // surface the verdict, then open a fresh emission so the goal row
+          // sits BETWEEN iterations and the steered re-run attaches to the new
+          // emission, not the pre-goal one.
           useAgent.getState().appendRawMessage(remoteKey, {
             id: `remote-goal-${Date.now()}`,
             role: 'system',
@@ -2650,6 +2654,7 @@ export function RemoteTranscriptDialog({
               },
             }),
           })
+          asstId = useAgent.getState().appendAssistantPlaceholder(remoteKey)
         }
       } else if (ev.type === 'tool_start') {
         useAgent.getState().startToolCall(remoteKey, asstId, ev.call_id ?? `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
@@ -11873,12 +11878,16 @@ export function Composer({
         textSinceTool = true
       } else {
         // Last row wasn't an assistant emission (edge case): still surface
-        // the verdict as a system row so the loop is visible.
+        // the verdict, then open a fresh emission so the goal row sits
+        // BETWEEN iterations and the steered re-run attaches to the new
+        // emission. Reset textSinceTool so the first delta starts fresh.
         appendRawMessage(bufKey, {
           id: `goal-${Date.now()}`,
           role: 'system',
           content: JSON.stringify({ goal }),
         })
+        curId = useAgent.getState().appendAssistantPlaceholder(bufKey)
+        textSinceTool = true
       }
     } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')

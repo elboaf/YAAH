@@ -205,7 +205,10 @@ def _try_loose_keys(text: str) -> dict | None:
     )
     if not passed_m:
         return None
-    passed = passed_m.group(2).lower() in {"true", "1", "yes"}
+    # group(2) may carry the JSON quotes (the regex matches "true"/"false");
+    # strip them so a quoted boolean is read the same as an unquoted one
+    # (otherwise `"true"` would fall through to passed=False).
+    passed = passed_m.group(2).strip('"\'').lower() in {"true", "1", "yes"}
     reason_m = re.search(
         r'''["\']?(reason)["\']?\s*:\s*"((?:[^"\\]|\\.)*)"''', text
     )

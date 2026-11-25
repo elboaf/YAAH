@@ -201,3 +201,112 @@ async def test_verifier_disabled_never_calls_verifier(tmp_path, monkeypatch):
     assert types.count("done") == 1
     assert "goal" not in types
     assert calls["verify"] == 0          # verifier never invoked
+
+
+def _objective_capture():
+    """A fake_chat that records every call's messages, plus a turn queue.
+
+    Only the model *turn* consumes a scripted stream; the verifier and the
+    best-effort title call are non-streaming dict responses (they must not
+    drain the turn queue — otherwise the verifier blocks on an empty queue and
+    the turn never completes). The verifier is faked to pass so the loop
+    finishes after the single scripted turn.
+    """
+    calls: list[list] = []
+    turn_scripts: asyncio.Queue = asyncio.Queue()
+
+    async def fake_chat(messages, tools=None, stream=True,
+                        model="", effort=None, max_tokens=None):
+        calls.append([dict(m) for m in messages])
+        if not stream:
+            return {"choices": [{"message": {"content": '{"passed": true}'}}]}
+        return FakeStream(await turn_scripts.get())
+
+    return calls, turn_scripts, fake_chat
+
+
+def _cfg(**overrides):
+    cfg = dict(cfgmod.DEFAULTS)
+    cfg.update(overrides)
+    return cfg
+
+
+@pytest.mark.asyncio
+async def test_objective_tail_absent_when_verifier_disabled(tmp_path, monkeypatch):
+    """#844 Stage C (CodeRabbit finding): the durable objective rides a tail
+    message ONLY when the verifier is on. With completion_verifier=False the
+    prompt must be byte-identical to the pre-#844 shape — no <objective> tail
+    appended, so an off verifier leaves the prompt unchanged."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("no tail when off")
+    ws = str(tmp_path)
+    calls, turn_scripts, fake_chat = _objective_capture()
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    monkeypatch.setattr(loop, "load_config", lambda **k: _cfg(completion_verifier=False))
+
+    await turn_scripts.put([{"type": "content", "text": "Done"},
+                            {"type": "finish"}])
+    await collect(loop.run_agent(cid, "Fix bug A", ws))
+
+    for call in calls:
+        assert not any(
+            "<objective>" in (m.get("content") or "") for m in call
+        ), "objective tail must not be injected when the verifier is off"
+
+
+@pytest.mark.asyncio
+async def test_objective_tail_present_when_verifier_enabled(tmp_path, monkeypatch):
+    """The inverse: with the verifier on, the durable objective IS injected as
+    a tail message — the gate is not simply 'always absent'."""
+    from backend.db.database import create_conversation
+
+    cid = await create_conversation("tail when on")
+    ws = str(tmp_path)
+    calls, turn_scripts, fake_chat = _objective_capture()
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    monkeypatch.setattr(loop, "load_config", lambda **k: _cfg(completion_verifier=True))
+
+    await turn_scripts.put([{"type": "content", "text": "Done"},
+                            {"type": "finish"}])
+    await collect(loop.run_agent(cid, "Fix bug A", ws))
+
+    assert calls, "expected at least one model call"
+    assert any(
+        "<objective>" in (m.get("content") or "")
+        for call in calls
+        for m in call
+    ), "objective tail must be injected when the verifier is on"
+
+
+@pytest.mark.asyncio
+async def test_whitespace_prompt_clears_persisted_goal(tmp_path, monkeypatch):
+    """#844 (CodeRabbit finding): an empty/whitespace prompt must CLEAR the
+    durable goal. The loop passes the (empty) string straight to
+    update_conversation — a bare None would be dropped by the write path and
+    leave a stale goal behind."""
+    from backend.db.database import (
+        create_conversation,
+        get_conversation,
+        update_conversation,
+    )
+
+    cid = await create_conversation("clear me")
+    ws = str(tmp_path)
+    await update_conversation(cid, session_goal="old durable goal")
+    assert (await get_conversation(cid))["session_goal"] == "old durable goal"
+
+    calls, turn_scripts, fake_chat = _objective_capture()
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    monkeypatch.setattr(loop, "load_config", lambda **k: _cfg())
+
+    # A whitespace-only prompt resolves to an empty objective.
+    await turn_scripts.put([{"type": "content", "text": "ok"},
+                            {"type": "finish"}])
+    await collect(loop.run_agent(cid, "   ", ws))
+
+    assert (await get_conversation(cid))["session_goal"] is None, (
+        "an empty prompt must clear the durable goal to NULL"
+    )
