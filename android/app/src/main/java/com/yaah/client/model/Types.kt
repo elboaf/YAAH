@@ -65,12 +65,10 @@ data class LeaseResponse(
 )
 
 data class TurnRequest(
-    val conversation_id: String,
-    val workspace_id: String,
-    val model: String,
-    val effort: String,
-    val message: String,
-    val turn_type: String = "chat"
+    val workspace: String = "",
+    val model_override: String? = null,
+    val effort_override: String? = null,
+    val message: String
 )
 
 data class TurnResponse(

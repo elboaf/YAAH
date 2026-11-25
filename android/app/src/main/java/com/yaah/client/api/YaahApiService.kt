@@ -35,7 +35,7 @@ interface YaahApiService {
         @Path("hostId") hostId: String,
         @Path("conversationId") conversationId: String,
         @Body body: TurnRequest
-    ): Response<TurnResponse>
+    ): Response<Void>
 
     @POST("api/remote/devices/{hostId}/turns/{conversationId}/cancel")
     suspend fun cancelTurn(
