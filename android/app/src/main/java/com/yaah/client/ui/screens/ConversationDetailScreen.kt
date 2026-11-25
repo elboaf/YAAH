@@ -12,9 +12,13 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+
 import androidx.compose.ui.unit.dp
 import com.yaah.client.api.YaahClient
 import com.yaah.client.model.ConversationDetails
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -33,18 +37,19 @@ fun ConversationDetailScreen(
     var sending by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    var laidOut by remember { mutableStateOf(false) }
 
     LaunchedEffect(convId) {
         loadDetails(scope, host, convId, { details = it }, { loading = false }, { error = it })
     }
 
-    LaunchedEffect(details?.messages?.size) {
-        // Newest message last; auto-scroll to the bottom on load / when a new
-        // message arrives. The user can still scroll up to read older ones.
+    // Auto-scroll to the newest message on load and whenever a new message
+    // arrives. The list sets laidOut=true once it has its first layout, then we
+    // scroll to the bottom. The user can still scroll up to read older ones.
+    LaunchedEffect(details?.messages?.size, laidOut) {
+        if (!laidOut) return@LaunchedEffect
         val count = details?.messages?.size ?: 0
-        if (count > 0) {
-            listState.animateScrollToItem(index = count - 1)
-        }
+        if (count > 0) listState.animateScrollToItem(index = count - 1)
     }
 
     Scaffold(
@@ -85,7 +90,9 @@ fun ConversationDetailScreen(
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
                 // Messages area
                 LazyColumn(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .onGloballyPositioned { laidOut = true },
                     contentPadding = PaddingValues(8.dp)
                 ) {
                     items(details?.messages ?: emptyList()) { msg ->
