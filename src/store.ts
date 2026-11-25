@@ -118,6 +118,26 @@ export function selectMessages(s: { conversationId: number | null; messagesByCon
   return s.messagesByConv[key] ?? EMPTY_MESSAGES
 }
 
+/** #844 (follow-up): the current goal-verification iteration for a buffer —
+ *  one more than the number of verifier verdict rows already present. A
+ *  fresh buffer has none, so it is 1 (the initial attempt); each
+ *  `beginGoalIteration` appends a `{goal:{…}}` system row and the count
+ *  advances. Derived from the rendered rows, so it stays consistent with
+ *  what the user sees and survives resume (replayed goal rows count). */
+export function goalIterationCount(messages: readonly ChatMessage[]): number {
+  let goalRows = 0
+  for (const m of messages) {
+    if (m.role !== 'system') continue
+    try {
+      const parsed = JSON.parse(m.content)
+      if (parsed && typeof parsed === 'object' && 'goal' in (parsed as object)) goalRows++
+    } catch {
+      // not JSON — not a goal row
+    }
+  }
+  return goalRows + 1
+}
+
 
 /** A live ask_user question waiting for the user's answer. */
 export interface PendingQuestion {
@@ -306,6 +326,12 @@ interface AgentState {
    */
   titleByConv: Record<string, string>
   setTitle: (convId: number, title: string) => void
+  /** #844 (follow-up): the durable session objective per conversation, keyed
+   *  by conversation id. Set from the conversation row's `session_goal` when
+   *  the chat loads, or from the first user message on a fresh turn (before
+   *  metadata arrives). Drives the top-of-chat objective card. */
+  objectiveByConv: Record<string, string>
+  setObjective: (key: string, objective: string) => void
 
   /**
    * Per-conversation telemetry tape: one ever-growing line that every tool
@@ -716,6 +742,9 @@ export const useAgent = create<AgentState>((set, get) => ({
   titleByConv: {},
   setTitle: (convId, title) =>
     set((s) => ({ titleByConv: { ...s.titleByConv, [String(convId)]: title } })),
+  objectiveByConv: {},
+  setObjective: (key, objective) =>
+    set((s) => ({ objectiveByConv: { ...s.objectiveByConv, [key]: objective } })),
 
   tapeByConv: {},
   appendTape: (key, chunk) =>
@@ -845,15 +874,26 @@ export const useAgent = create<AgentState>((set, get) => ({
 
   appendUserMessage: (key, text, images, skills, queued = false, attachments) => {
     const id = genId()
-    set((s) => ({
-      messagesByConv: {
-        ...s.messagesByConv,
-        [key]: [
-          ...(s.messagesByConv[key] ?? []),
-          { id, role: 'user', content: text, images, skills, queued, attachments },
-        ],
-      },
-    }))
+    set((s) => {
+      const existing = s.messagesByConv[key] ?? []
+      const next: Partial<AgentState> = {
+        messagesByConv: {
+          ...s.messagesByConv,
+          [key]: [
+            ...existing,
+            { id, role: 'user', content: text, images, skills, queued, attachments },
+          ],
+        },
+      }
+      // #844 (follow-up): the first user message of a buffer is the durable
+      // objective. Seed it here so the objective card shows on a fresh turn
+      // before the conversation row's session_goal metadata has loaded. An
+      // explicit setObjective (from the loaded row) runs later and still wins.
+      if (!existing.some((m) => m.role === 'user') && !s.objectiveByConv[key]) {
+        next.objectiveByConv = { ...s.objectiveByConv, [key]: text }
+      }
+      return next
+    })
     return id
   },
 

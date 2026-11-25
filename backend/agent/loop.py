@@ -2976,13 +2976,25 @@ async def _run_agent_claimed(
                             conversation_id, _verdict.get("usage")
                         )
                     if not _verdict.get("error") and not _verdict.get("passed"):
+                        # #848 (follow-up): persist the same {goal:{...}} row the
+                        # live handler creates so a reload's iteration count still
+                        # includes this failed attempt (the count is derived from
+                        # saved goal rows). Stream the identical event unchanged.
+                        goal_row = {
+                            "phase": "verification_failed",
+                            "passed": False,
+                            "reason": _verdict.get("reason", ""),
+                            "nextAction": _verdict.get("nextAction", ""),
+                        }
+                        await add_message(
+                            conversation_id,
+                            "system",
+                            json.dumps({"goal": goal_row}),
+                        )
                         yield _ndjson(
                             {
                                 "type": "goal",
-                                "phase": "verification_failed",
-                                "passed": False,
-                                "reason": _verdict.get("reason", ""),
-                                "nextAction": _verdict.get("nextAction", ""),
+                                **goal_row,
                             }
                         )
                         # The assistant's final text must reach the next model

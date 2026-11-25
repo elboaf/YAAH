@@ -150,6 +150,10 @@ export interface ConversationRow {
   effort?: string
   /** #383: the chat's pinned sub-agent scope; '' = sub-agent: auto. */
   subagent_model?: string
+  /** #844 (follow-up): the durable session objective (the root user prompt),
+   *  persisted per turn and re-injected into every turn's context. NULL/empty
+   *  = no active objective. Surfaced as the top-of-chat objective card. */
+  session_goal?: string | null
 }
 
 export interface ContextInfo {

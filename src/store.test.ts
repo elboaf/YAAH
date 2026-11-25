@@ -4,7 +4,8 @@
 // messages, the execution one flagged with the plan it implements.
 
 import { describe, expect, it, beforeEach } from 'vitest'
-import { useAgent, buildMessages, resolveSendTarget } from './store'
+import { useAgent, buildMessages, resolveSendTarget, goalIterationCount } from './store'
+import type { ChatMessage } from './store'
 import { shouldChimeFinish, isUnfocused } from './NotificationSounds'
 
 const row = (id: number, role: string, content: string, extra: Record<string, unknown> = {}) => ({
@@ -693,6 +694,60 @@ describe('steering transcript order', () => {
     expect(nextId).toBeNull()
     // No goal row appended either — the guard leaves an unsegmented stream alone.
     expect(useAgent.getState().messagesByConv['99'].map((m) => m.role)).toEqual(['user'])
+  })
+})
+
+// #844 (follow-up): the durable objective seeded on the first user row, and
+// the verifier-loop iteration count the objective card renders.
+describe('objective + goal iteration (#844 follow-up)', () => {
+  beforeEach(() => {
+    useAgent.setState({ messagesByConv: {}, objectiveByConv: {} })
+  })
+
+  const msg = (id: string, role: ChatMessage['role'], content: string): ChatMessage => ({ id, role, content })
+
+  it('goalIterationCount starts at 1 and advances once per verifier verdict row', () => {
+    expect(goalIterationCount([])).toBe(1)
+    const withGoal = [
+      msg('a', 'assistant', 'done'),
+      msg('g', 'system', JSON.stringify({ goal: { phase: 'verification_failed', passed: false, reason: '', nextAction: 'x' } })),
+    ]
+    expect(goalIterationCount(withGoal)).toBe(2)
+    // A non-goal system row (a note) does not advance the count.
+    const withNote = [...withGoal, msg('n', 'system', JSON.stringify({ note: 'hey' }))]
+    expect(goalIterationCount(withNote)).toBe(2)
+    // A non-JSON system row is ignored, not counted.
+    const withJunk = [...withNote, msg('j', 'system', 'not json')]
+    expect(goalIterationCount(withJunk)).toBe(2)
+  })
+
+  it('goalIterationCount is per buffer', () => {
+    useAgent.setState({
+      messagesByConv: {
+        '1': [msg('g', 'system', JSON.stringify({ goal: {} }))],
+        '2': [],
+      },
+    })
+    expect(goalIterationCount(useAgent.getState().messagesByConv['1'] ?? [])).toBe(2)
+    expect(goalIterationCount(useAgent.getState().messagesByConv['2'] ?? [])).toBe(1)
+  })
+
+  it('appendUserMessage seeds the objective from the first user row only', () => {
+    const store = useAgent.getState()
+    const id = store.appendUserMessage('7', 'build the login flow', [])
+    expect(id).toBeTruthy()
+    expect(useAgent.getState().objectiveByConv['7']).toBe('build the login flow')
+    // A later user row (a steering follow-up) does not overwrite it.
+    store.appendUserMessage('7', 'also add tests', [])
+    expect(useAgent.getState().objectiveByConv['7']).toBe('build the login flow')
+  })
+
+  it('an explicit setObjective wins over the first-user fallback', () => {
+    const store = useAgent.getState()
+    store.appendUserMessage('8', 'first user text', [])
+    expect(useAgent.getState().objectiveByConv['8']).toBe('first user text')
+    useAgent.getState().setObjective('8', 'authoritative session goal')
+    expect(useAgent.getState().objectiveByConv['8']).toBe('authoritative session goal')
   })
 })
 

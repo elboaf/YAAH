@@ -128,7 +128,7 @@ import {
 import { isWindowsPlatform } from './update'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
-import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentStatus } from './store'
+import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, goalIterationCount, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentStatus } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -1410,6 +1410,31 @@ function ExpandableAttachmentChip({
   )
 }
 
+/** #844 (follow-up): the durable-session objective card. Sits at the top of a
+ *  transcript whenever the conversation has an active objective, so the run
+ *  always shows what it is working toward plus the current verifier-loop
+ *  iteration (surfaced once the loop has run past the initial attempt). Reuses
+ *  the shared `lg-card` shell so it reads as part of the same ledger band; the
+ *  objective text and iteration count are read from the store so the card is
+ *  identical on the local and thin-client transcript paths. */
+export function ObjectiveCard({ objective, iteration }: {
+  objective: string
+  iteration: number
+}) {
+  return (
+    <div className="lg-card mb-2" role="status">
+      <div className="lg-head">
+        <span aria-hidden="true" className="lg-caret">◆</span>
+        <span className="lg-title">goal</span>
+        {iteration > 1 && (
+          <span className="lg-sub text-sky-300/90">iteration {iteration}</span>
+        )}
+      </div>
+      <div className="px-1 pb-2 pt-1 text-xs leading-snug text-zinc-200">{objective}</div>
+    </div>
+  )
+}
+
 /** Issue #279: memoized — a streaming delta only ever mutates ONE message
  *  object in the store (appendTextDelta clones just the touched message), so
  *  untouched rows keep reference identity and memo skips their re-render.
@@ -2554,6 +2579,11 @@ export function RemoteTranscriptDialog({
   }
 
   const renderedMessages = draftMessages ?? messages
+  // #844 (follow-up): the remote objective — the replayed transcript's first
+  // user message (the durable root prompt). The local path reads the
+  // authoritative session_goal from the store; the thin-client replay carries
+  // no row-level session_goal, so the first user row stands in.
+  const remoteObjective = (renderedMessages ?? []).find((m) => m.role === 'user')?.content ?? ''
 
   // ---- Remote turn composer (#110) ---------------------------------------
   // Streams an owner-qualified turn through the device turn endpoint and
@@ -2767,6 +2797,9 @@ export function RemoteTranscriptDialog({
           {editing && draftMessages && <p className="mb-2 font-mono text-[10px] text-emerald-400">EDIT LEASE HELD · transcript-only changes; composer disabled while editing</p>}
           {!editing && sendNote && <p role="status" className="mb-2 text-xs text-red-400">{sendNote}</p>}
           {renderedMessages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
+          {remoteObjective && (
+            <ObjectiveCard objective={remoteObjective} iteration={goalIterationCount(renderedMessages ?? [])} />
+          )}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
         </div>
       {/* #308 follow-up: the remote ask_user card — answers route to the
@@ -10110,7 +10143,13 @@ export function ChatScopePickers() {
     let cancelled = false
     getConversation(conversationId)
       .then((c) => {
-        if (!cancelled) setRowScope({ model: c.model || '', effort: c.effort || '', subagent_model: c.subagent_model || '' })
+        if (!cancelled) {
+          setRowScope({ model: c.model || '', effort: c.effort || '', subagent_model: c.subagent_model || '' })
+          // #844 (follow-up): seed the durable objective from the conversation
+          // row's session_goal (authoritative — survives resume/restart). An
+          // explicit setObjective wins over the first-user-message fallback.
+          useAgent.getState().setObjective(String(conversationId), c.session_goal || '')
+        }
       })
       .catch(() => {})
     return () => {
@@ -10553,6 +10592,13 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   // window on any chat click). selectMessages returns a stable reference.
   const messages = useAgent(selectMessages)
   const status = useStatus()
+  // #844 (follow-up): the on-screen conversation's durable objective, as a
+  // stable string selector (re-renders only when the objective changes). The
+  // iteration count derives from the already-reactive `messages` below, so the
+  // objective card advances in lockstep with the verifier loop.
+  const objectiveText = useAgent(
+    (s) => s.objectiveByConv[s.conversationId === null ? 'draft' : String(s.conversationId)],
+  )
   const error = useError()
   const pendingQuestion = useAgent((s) => {
     const key = s.bufferKey()
@@ -10964,6 +11010,9 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
               Tool calls stream live as chips, then collapse to an expandable trace.
             </p>
           </div>
+        )}
+        {objectiveText && (
+          <ObjectiveCard objective={objectiveText} iteration={goalIterationCount(messages)} />
         )}
         {messages.map((m) => (
           <MessageView key={m.id} msg={m} live={m.id === liveId} />

@@ -411,3 +411,61 @@ async def test_verifier_infra_error_records_no_usage(tmp_path, monkeypatch):
     # The turn contributed no usage and the infra-error verifier recorded
     # none.
     assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_failed_verifier_persists_goal_row(tmp_path, monkeypatch):
+    """#848 (follow-up): the failed-verification goal row is persisted so a
+    reload's iteration count still includes it (the count is derived from
+    saved {goal:{...}} rows). The streamed event is unchanged."""
+    from backend.db.database import (
+        create_conversation,
+        get_messages,
+        update_conversation,
+    )
+
+    cid = await create_conversation("persist the goal")
+    await update_conversation(cid, session_goal="do the thing")
+    ws = str(tmp_path)
+
+    turn_scripts: asyncio.Queue = asyncio.Queue()
+    verdicts: asyncio.Queue = asyncio.Queue()
+
+    async def fake_chat(messages, tools=None, stream=True,
+                        model="", effort=None, max_tokens=None):
+        if not stream:
+            content = await verdicts.get()
+            return {"choices": [{"message": {"content": content}}]}
+        return FakeStream(await turn_scripts.get())
+
+    monkeypatch.setattr(loop.model_client, "chat", fake_chat)
+    # Turn 1 (fails the verifier) and the steered re-run Turn 2 (passes).
+    await turn_scripts.put([{"type": "content", "text": "Done"},
+                            {"type": "finish"}])
+    await turn_scripts.put([{"type": "content", "text": "Finished"},
+                            {"type": "finish"}])
+    await verdicts.put(json.dumps({
+        "passed": False, "reason": "no evidence yet",
+        "nextAction": "write the file",
+    }))
+    await verdicts.put(json.dumps({
+        "passed": True, "reason": "evidence present", "nextAction": "",
+    }))
+
+    events = await collect(loop.run_agent(cid, "Fix bug A", ws))
+    # The streamed event is unchanged (still carries the verdict fields).
+    goal_ev = next(e for e in events if e["type"] == "goal")
+    assert goal_ev["phase"] == "verification_failed"
+    assert goal_ev["nextAction"] == "write the file"
+
+    # The goal row is persisted as a system row so a reload counts it.
+    persisted = await get_messages(cid)
+    goal_rows = [
+        json.loads(m["content"])
+        for m in persisted
+        if m["role"] == "system" and m["content"].strip().startswith("{")
+    ]
+    assert any(
+        "goal" in row and row["goal"].get("phase") == "verification_failed"
+        for row in goal_rows
+    ), "failed-verification goal row must be persisted"
