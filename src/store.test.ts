@@ -664,6 +664,36 @@ describe('steering transcript order', () => {
     expect(messages[3].id).toBe(emissionId)
     expect(messages[3].content).toBe('after steering')
   })
+
+  it('opens a fresh emission after the goal row so iterations stay separated', () => {
+    const store = useAgent.getState()
+    store.appendAssistantPlaceholder('42')
+    store.appendTextDelta('42', useAgent.getState().messagesByConv['42'][0].id, 'iteration one')
+    const nextId = useAgent.getState().beginGoalIteration('42', {
+      phase: 'verification_failed',
+      passed: false,
+      reason: 'no artifact yet',
+      nextAction: 'write the file',
+    })
+    expect(nextId).toBeTruthy()
+    const messages = useAgent.getState().messagesByConv['42']
+    expect(messages.map((message) => message.role)).toEqual(['assistant', 'system', 'assistant'])
+    expect(messages[0].content).toBe('iteration one')
+    expect(messages[1].role).toBe('system')
+    expect(JSON.parse(messages[1].content)).toEqual({
+      goal: { phase: 'verification_failed', passed: false, reason: 'no artifact yet', nextAction: 'write the file' },
+    })
+    expect(messages[2].id).toBe(nextId)
+    expect(messages[2].content).toBe('')
+  })
+
+  it('does not segment when the last row is not an assistant emission', () => {
+    useAgent.setState({ messagesByConv: { '99': [{ id: 'u1', role: 'user', content: 'hi' }] } })
+    const nextId = useAgent.getState().beginGoalIteration('99', { nextAction: 'go' })
+    expect(nextId).toBeNull()
+    // No goal row appended either — the guard leaves an unsegmented stream alone.
+    expect(useAgent.getState().messagesByConv['99'].map((m) => m.role)).toEqual(['user'])
+  })
 })
 
 // #226: persisted briefings ride the row's `say` column; hydration must

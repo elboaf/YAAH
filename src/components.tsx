@@ -2588,7 +2588,7 @@ export function RemoteTranscriptDialog({
     streamingRef.current = true
     setSendNote(null)
     const userId = `remote-user-${Date.now()}`
-    const asstId = `remote-asst-${Date.now()}`
+    let asstId = `remote-asst-${Date.now()}`
     const workspace = remoteConversationWorkspace ?? ""
     useAgent.setState((s) => ({
       messagesByConv: {
@@ -2621,25 +2621,36 @@ export function RemoteTranscriptDialog({
         })
       } else if (ev.type === 'goal') {
         // #844: post-turn completion verifier verdict — surface as a system
-        // row so the iteration loop is visible on remote reads too.
+        // row (opening a fresh emission for the steered re-run) so the
+        // iteration loop is visible on remote reads too, with the goal row
+        // between the two iterations rather than after both.
         const g = ev as {
           phase?: string
           passed?: boolean
           reason?: string
           nextAction?: string
         }
-        useAgent.getState().appendRawMessage(remoteKey, {
-          id: `remote-goal-${Date.now()}`,
-          role: 'system',
-          content: JSON.stringify({
-            goal: {
-              phase: g.phase ?? 'verification_failed',
-              passed: g.passed ?? false,
-              reason: g.reason ?? '',
-              nextAction: g.nextAction ?? '',
-            },
-          }),
+        const nextId = useAgent.getState().beginGoalIteration(remoteKey, {
+          phase: g.phase ?? 'verification_failed',
+          passed: g.passed ?? false,
+          reason: g.reason ?? '',
+          nextAction: g.nextAction ?? '',
         })
+        if (nextId) asstId = nextId
+        else {
+          useAgent.getState().appendRawMessage(remoteKey, {
+            id: `remote-goal-${Date.now()}`,
+            role: 'system',
+            content: JSON.stringify({
+              goal: {
+                phase: g.phase ?? 'verification_failed',
+                passed: g.passed ?? false,
+                reason: g.reason ?? '',
+                nextAction: g.nextAction ?? '',
+              },
+            }),
+          })
+        }
       } else if (ev.type === 'tool_start') {
         useAgent.getState().startToolCall(remoteKey, asstId, ev.call_id ?? `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
         useAgent.getState().setStatus(remoteKey, 'running-tool')
@@ -11844,21 +11855,31 @@ export function Composer({
       })
     } else if (ev.type === 'goal') {
       // #844: the post-turn completion verifier rejected a natural
-      // completion. Surface the verifier's verdict and its steer as a visible
-      // system row so the iteration loop is seen (a silent re-run would look
-      // like the model just kept going), not swallowed into the turn.
-      appendRawMessage(bufKey, {
-        id: `goal-${Date.now()}`,
-        role: 'system',
-        content: JSON.stringify({
-          goal: {
-            phase: ev.phase ?? 'verification_failed',
-            passed: ev.passed ?? false,
-            reason: ev.reason ?? '',
-            nextAction: ev.nextAction ?? '',
-          },
-        }),
-      })
+      // completion. Flush iteration 1's text, surface the verifier's verdict
+      // as a visible system row, and open a fresh emission for the steered
+      // re-run — so the goal row sits BETWEEN the two iterations (not after
+      // both are concatenated). A silent re-run would otherwise look like the
+      // model just kept going.
+      textDeltas.flush()
+      const goal = {
+        phase: ev.phase ?? 'verification_failed',
+        passed: ev.passed ?? false,
+        reason: ev.reason ?? '',
+        nextAction: ev.nextAction ?? '',
+      }
+      const nextId = useAgent.getState().beginGoalIteration(bufKey, goal)
+      if (nextId) {
+        curId = nextId
+        textSinceTool = true
+      } else {
+        // Last row wasn't an assistant emission (edge case): still surface
+        // the verdict as a system row so the loop is visible.
+        appendRawMessage(bufKey, {
+          id: `goal-${Date.now()}`,
+          role: 'system',
+          content: JSON.stringify({ goal }),
+        })
+      }
     } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')
       if (ev.text) {
