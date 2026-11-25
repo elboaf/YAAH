@@ -357,6 +357,12 @@ interface AgentState {
   appendAssistantPlaceholder: (key: string) => string
   /** Start a fresh assistant emission after injected user rows, optionally with its first text delta. */
   startAssistantEmissionAfterUser: (key: string, firstText?: string) => string | null
+  /** #844: a post-turn verifier rejected a natural completion. Append the
+   *  verifier verdict as a system row, then open a fresh empty assistant
+   *  emission for the steered re-run, so the goal row sits BETWEEN the two
+   *  iterations (not after both are concatenated). Returns the new emission
+   *  id so the caller can route the next text deltas onto it. */
+  beginGoalIteration: (key: string, goal: { phase?: string; passed?: boolean; reason?: string; nextAction?: string }) => string | null
   /** Capture a `say` briefing onto its message (#66): speech-only, never
    *  rendered; consumed by the narrator when the emission completes. */
   setSay: (key: string, msgId: string, say: string) => void
@@ -886,6 +892,29 @@ export const useAgent = create<AgentState>((set, get) => ({
       }
     })
     return started ? id : null
+  },
+
+  beginGoalIteration: (key, goal) => {
+    let nextId: string | null = null
+    set((s) => {
+      const messages = s.messagesByConv[key] ?? []
+      // Only segment if the last row is the current assistant emission —
+      // otherwise the goal row would land in the middle of an unrelated row.
+      if (messages[messages.length - 1]?.role !== 'assistant') return s
+      const goalId = genId()
+      nextId = genId()
+      return {
+        messagesByConv: {
+          ...s.messagesByConv,
+          [key]: [
+            ...messages,
+            { id: goalId, role: 'system', content: JSON.stringify({ goal }) },
+            { id: nextId, role: 'assistant', content: '' },
+          ],
+        },
+      }
+    })
+    return nextId
   },
 
   setSay: (key, msgId, say) => {

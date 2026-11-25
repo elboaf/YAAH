@@ -537,3 +537,51 @@ def test_439_attachment_with_inline_backtick_excluded():
         body, _retrowave_scan(), MODEL_PROMPT, user_text=user_text,
     )
     assert "lora" not in body
+
+
+# ------------------------------------------------- resume goal (#848)
+
+async def test_run_agent_resume_preserves_session_goal(
+    monkeypatch, tmp_path, configured,
+):
+    """A resume transport text is the sentinel "resume", and persist_user
+    is False (the real request is already stored). Without the fix the
+    loop resolved turn_user_text to "resume" and overwrote the durable
+    session goal with that sentinel (#848 review). On resume the goal must
+    come from the stored root request, not the sentinel."""
+    import backend.agent.loop as loop_mod
+    from backend.db import database
+
+    tools._CAPS_CACHE.clear()
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeClient)
+
+    async def _always_pass(*_a, **_k):
+        return {"passed": True, "reason": "", "nextAction": ""}
+
+    # Verifier passes so the turn completes naturally; the session_goal
+    # write runs before the loop either way, so this only keeps the flow
+    # short.
+    monkeypatch.setattr(loop_mod.verify, "run_completion_verifier",
+                        _always_pass)
+
+    scripts = [[{"type": "finish"}]]
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return _FakeStream(scripts.pop(0) if scripts else [{"type": "finish"}])
+
+    monkeypatch.setattr(loop_mod.model_client, "chat", fake_chat)
+
+    cid = await create_conversation(str(tmp_path), "t")
+    # The original turn already stored the root request; a resume does NOT
+    # re-persist the "resume" sentinel (persist_user=False).
+    await add_message(cid, "user", "Fix bug A")
+
+    events = []
+    async for e in loop_mod.run_agent(
+        cid, "resume", str(tmp_path), persist_user=False,
+    ):
+        events.append(json.loads(e))
+
+    row = await database.get_conversation(cid)
+    # The durable objective is the stored root request, not "resume".
+    assert row["session_goal"] == "Fix bug A"

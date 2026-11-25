@@ -50,6 +50,13 @@ DEFAULTS = {
     # Per-model step budgets (Settings -> Providers -> each model entry).
     # The agent loop resolves model entry > provider entry > max_steps.
     "model_steps": {},
+    # #844: post-turn completion verifier. When True, a turn that stops
+    # calling tools runs a cheap, tool-less verifier that audits the durable
+    # objective against real evidence before the turn is allowed to finish;
+    # on failure it loops with the verifier's nextAction (never trusts the
+    # model's own stop). True = the ycode parity default; a flaky provider
+    # fails OPEN (the turn still completes) rather than wedging.
+    "completion_verifier": True,
     # Last workspace chosen in the sidebar, so it survives app restarts.
     "last_workspace": "",
     # Interface scale for the whole UI (CSS zoom on the app root). The

@@ -30,8 +30,10 @@ from typing import AsyncIterator
 from backend.agent import model_client
 from backend.agent import slotcache
 from backend.agent import extract as extract_mod
+from backend.agent import verify
 
 from backend.agent import file_changes
+from backend.agent import goal as goal_mod
 from backend.agent.config import load_config, save_config
 from backend.agent.imagedata import load_data_url
 from backend.agent import skills as skill_registry
@@ -143,6 +145,108 @@ async def _persist_file_change_summary(conversation_id: int, summary: dict) -> N
     except Exception:
         # Persistence must not mask the run's terminal status.
         pass
+
+
+def _tool_content_text(content: object) -> str:
+    """Render a tool result's content (a string, or a multimodal parts list)
+    as a single text string for the verifier transcript."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text":
+                    texts.append(part.get("text", ""))
+                elif (
+                    part.get("type") == "image_url"
+                    and isinstance(part.get("image_url"), dict)
+                ):
+                    texts.append(f"[image: {str(part['image_url'].get('url', ''))[:60]}]")
+        return " ".join(t for t in texts if t)
+    return str(content)
+
+
+def _build_verifier_transcript(
+    messages: list, assistant_content: str, limit: int = 24
+) -> str:
+    """#844 Stage C: a bounded, human-readable slice of what the agent did
+    this turn, for the verifier to audit.
+
+    Skips the (huge) frozen system prompt and takes only the turn's tail, so
+    the verifier never sees the whole history and the call stays cheap. Tool
+    calls and their results are the primary evidence, so each assistant tool
+    call is rendered with its function name and serialized arguments, and
+    each result is paired back to the call it answers (by tool_call_id) with
+    the operation name on the result line.
+    """
+    parts: list[str] = []
+    tail = messages[-limit:] if len(messages) > limit else messages
+    # Index tool-call id -> operation name so a result can name the call it
+    # answers: the replayed tool row carries only tool_call_id, not the name.
+    call_names: dict[str, str] = {}
+    for m in tail:
+        tcs = m.get("tool_calls")
+        if isinstance(tcs, list):
+            for tc in tcs:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                call_names.setdefault(tc.get("id", ""), fn.get("name", ""))
+    for m in tail:
+        role = m.get("role")
+        if role == "system":
+            continue
+        content = m.get("content")
+        if role == "assistant":
+            parts.append(f"[assistant] {_tool_content_text(content)}")
+            for tc in (m.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                args = fn.get("arguments")
+                # Arguments arrive serialized; a structured dict/list still
+                # round-trips through json so the transcript stays text.
+                if isinstance(args, (dict, list)):
+                    args = json.dumps(args)
+                elif not isinstance(args, str):
+                    args = "" if args is None else str(args)
+                parts.append(f"[tool call: {fn.get('name', '')} {args}]")
+        elif role == "tool":
+            name = call_names.get(m.get("tool_call_id", ""), "")
+            tag = f"[tool result: {name}]" if name else "[tool result]"
+            parts.append(f"{tag} {_tool_content_text(content)}")
+        else:
+            parts.append(f"[{role}] {_tool_content_text(content)}")
+    if assistant_content:
+        parts.append(f"[assistant] {assistant_content}")
+    return "\n".join(parts)
+
+
+async def _record_call_usage(
+    conversation_id: int, usage: dict | None
+) -> None:
+    """Record one billed model call's cost + completion tokens (#1245: the
+    provider bills at the usage chunk, so record at the point of billing).
+
+    Shared by the turn's per-call writes and the post-turn verifier call, so
+    both spend lands in the same conversation total. Best-effort: a failed
+    write must never fail the call. Empty usage is a no-op; a non-numeric
+    cost falls back to a tokens-only write, mirroring the main path."""
+    if not usage:
+        return
+    cost = usage.get("cost")
+    if cost is not None:
+        try:
+            cost = float(cost)
+        except (TypeError, ValueError):
+            cost = None
+    tokens = int(usage.get("completion_tokens", 0) or 0)
+    if cost is not None or tokens:
+        try:
+            await add_conversation_cost(conversation_id, cost, tokens)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _is_conversational_reply(title: str) -> bool:
@@ -2023,17 +2127,49 @@ async def _run_agent_claimed(
 
     # #439: the root user's typed words, resolved once per turn. The
     # wrapper hands them down for the normal paths; a caller that passed
-    # none (exotic resume shapes, direct harness callers) resolves the
-    # turn's root user message from the DB here - AFTER the persist above
-    # (or from the already-stored row when persist_user=False). The
-    # latest user row is the same corpus get_last_user_message serves;
-    # a resume replay's earlier rows are equally stale as a style
-    # corpus, and an empty-text turn stays empty (no match). Steer
-    # boundaries below re-resolve from the live queue when a steered
-    # message lands mid-run (#439 review).
-    turn_user_text = user_text or await get_last_user_message(
-        conversation_id
+    # none (direct harness callers) resolves the turn's root user message
+    # from the DB here - AFTER the persist above. A resume is different:
+    # the transport text is the sentinel "resume" and persist_user is
+    # False (the real request is already stored), so feeding "resume" here
+    # would overwrite the durable session goal with that sentinel (#848
+    # review). On resume resolve from the DB instead, where the stored root
+    # request lives. The latest user row is the same corpus
+    # get_last_user_message serves, and an empty-text turn stays empty (no
+    # match). Steer boundaries below re-resolve from the live queue when a
+    # steered message lands mid-run (#439 review).
+    turn_user_text = (
+        user_text
+        if persist_user and user_text
+        else await get_last_user_message(conversation_id)
     )
+
+    # #844 Stage C: the post-turn completion verifier is opt-out (default on).
+    # Read early here — the durable objective's tail injection (objective_tail,
+    # below) is gated on this, so an off verifier leaves the prompt byte-identical
+    # to the pre-#844 shape.
+    completion_verifier_enabled = bool(
+        load_config().get("completion_verifier", True)
+    )
+
+    # #844: the durable session objective. Persist the root prompt so it
+    # survives session restart and is re-injected into every turn's context
+    # (objective_tail_message, below). Each new prompt resets it to the new
+    # root; an empty prompt clears it. The objective rides as a tail message,
+    # never in the frozen system-prompt head, so prefix caching is untouched.
+    # Best-effort: a failed write must not break the turn.
+    session_goal = (turn_user_text or "").strip()
+    try:
+        await update_conversation(
+            conversation_id,
+            touch_updated_at=False,
+            # Pass the (possibly empty) string directly: update_conversation
+            # drops None-valued fields, so `session_goal or None` would leave a
+            # stale goal in place when the user sends an empty prompt. An empty
+            # string reaches the write boundary and is normalised to NULL there.
+            session_goal=session_goal,
+        )
+    except Exception:  # noqa: BLE001 — the objective is an anchor, not a gate
+        log.warning("session_goal_write_failed")
 
     # Per-conversation system prompt override (Q17) wins over the global
     # one.
@@ -2223,7 +2359,19 @@ async def _run_agent_claimed(
         messages.append(
             {"role": "user", "content": invoked_skill_block}
         )
+    # #844: the durable objective, as a tail message after history so it reads
+    # as the most recent reminder (recency) and never displaces a real first
+    # user message in the transcript. Kept out of the frozen head (see goal.py)
+    # so the prefix cache stays byte-stable; a per-turn objective only costs a
+    # tail re-prefill, like growing history.
     messages.extend(history)
+    # Only when the verifier is on AND history is replayed: the objective
+    # tail is part of the #844 loop, so an off verifier (or a memory-off,
+    # fresh-context run) must leave the prompt byte-identical to before.
+    if completion_verifier_enabled and include_history:
+        _objective_tail = goal_mod.objective_tail_message(session_goal)
+        if _objective_tail:
+            messages.append(_objective_tail)
     # Static mode, freeze turn: persist the head exactly as this turn's
     # model call sends it, alongside the workspace it was built under, awaited
     # inline so a race with the NEXT turn's read is impossible (a detached
@@ -2306,6 +2454,11 @@ async def _run_agent_claimed(
     # the turn). Per-MODEL first (Settings -> Providers -> each model entry,
     # issue #111), then the legacy per-provider value, then the global.
     max_steps = _resolve_max_steps(load_config(), model_override)
+
+    # #844 Stage C: the post-turn completion verifier is opt-out (default on).
+    # When off, the loop behaves exactly as before — no verifier call.
+    # (Read above, alongside the durable objective, so the objective-tail
+    # injection can be gated on it.)
 
     # Image-strip state for the mid-turn rebuild: the note the proactive
     # vision probe / #428 retry merged into the head (None = no strip ran).
@@ -2515,26 +2668,11 @@ async def _run_agent_claimed(
                         # (cancelled, errored, budget-exhausted) keeps its
                         # cost in the DB. add_conversation_cost is an
                         # atomic increment, so per-call writes sum correctly.
-                        _u = ev.get("usage") or {}
-                        _call_cost = _u.get("cost")
-                        if _call_cost is not None:
-                            try:
-                                _call_cost = float(_call_cost)
-                            except (TypeError, ValueError):
-                                _call_cost = None
-                        if _call_cost is not None or (
-                            _u.get("completion_tokens", 0) or 0
-                        ):
-                            try:
-                                await add_conversation_cost(
-                                    conversation_id,
-                                    _call_cost,
-                                    int(_u.get("completion_tokens", 0) or 0),
-                                )
-                            except Exception:  # noqa: BLE001
-                                # Best-effort: cost tracking must not fail
-                                # the call.
-                                pass
+                        # Reused by the post-turn verifier call (#848), so a
+                        # turn's and its audit's spend land in the same total.
+                        await _record_call_usage(
+                            conversation_id, ev.get("usage") or {}
+                        )
                 # Flush ordinary text at EOF, but never expose a possible
                 # partial opener or an unterminated briefing.
                 if tail and not say_open:
@@ -2774,17 +2912,29 @@ async def _run_agent_claimed(
                             "Try shortening the request or splitting it into smaller steps.]",
                         }
                     )
+                # #844 Stage C: gate completion on the post-turn verifier. The
+                # model marks its own stop (no more tool calls); the verifier
+                # independently audits the durable objective against real
+                # evidence (ycode #2/#3). On failure we do NOT emit done — we
+                # surface the verifier's nextAction as the iteration title and
+                # loop, re-feeding it as a steering nudge (ycode #4). The loop
+                # is bounded by max_steps. A verifier infra error fails OPEN
+                # (the turn completes) so a flaky provider never wedges it.
                 # (The per-model-call `usage` emission above already covered
                 # the turn's final call — this spot used to re-emit it.)
                 # Issue #557: checkpoint the just-finished prefix as
                 # this conversation's single slot-cache bin (the persona's
-                # BASE was already banked at the gate's bootstrap) - BEFORE
-                # the title call below, an auxiliary completion that would
-                # overwrite the slot's content (and possibly swap
-                # children) ahead of the save. Awaited INLINE - the next
-                # turn's gate must observe the post-save fingerprint; a
-                # detached save would race a fast follow-up turn.
-                # Best-effort: failures log, the turn still completes.
+                # BASE was already banked at the gate's bootstrap) - BEFORE the
+                # auxiliary completions below (verifier, then title), each of
+                # which would otherwise overwrite slot 0's content ahead of the
+                # save and wedge the prefix cache on the next gate restore.
+                # Run before the verifier so the bin holds the clean
+                # conversation prefix, not the verifier's prompt. Awaited
+                # INLINE - the next turn's gate must observe the post-save
+                # fingerprint; a detached save would race a fast follow-up
+                # turn. Runs on every natural stop (each verifier-loop
+                # iteration too), so the bin is refreshed before each auxiliary
+                # call. Best-effort: failures log, the turn still completes.
                 if include_history:
                     await slotcache.flush(
                         model=model_override,
@@ -2794,6 +2944,65 @@ async def _run_agent_claimed(
                         usage=state.get("usage"),
                         tools=tools,
                     )
+                # #844 Stage C: gate completion on the post-turn verifier. The
+                # model marks its own stop (no more tool calls); the verifier
+                # independently audits the durable objective against real
+                # evidence (ycode #2/#3). On failure we do NOT emit done — we
+                # surface the verifier's nextAction as the iteration title and
+                # loop, re-feeding it as a steering nudge (ycode #4). The loop
+                # is bounded by max_steps. A verifier infra error fails OPEN
+                # (the turn completes) so a flaky provider never wedges it.
+                # Raced against cancel_ev (issue #389) so a Stop cuts the
+                # in-flight audit instead of blocking on it.
+                if completion_verifier_enabled and session_goal:
+                    _verdict = await _race_model_call(
+                        asyncio.create_task(
+                            verify.run_completion_verifier(
+                                session_goal,
+                                _build_verifier_transcript(
+                                    messages, assistant_content
+                                ),
+                                model=model_override,
+                                effort=effort_override,
+                            )
+                        ),
+                        cancel_ev,
+                    )
+                    # #848: the verifier is a real billed model call; record its
+                    # spend once, alongside the turn's other usage. Infra-error
+                    # responses carry no usage and are skipped.
+                    if not _verdict.get("error"):
+                        await _record_call_usage(
+                            conversation_id, _verdict.get("usage")
+                        )
+                    if not _verdict.get("error") and not _verdict.get("passed"):
+                        yield _ndjson(
+                            {
+                                "type": "goal",
+                                "phase": "verification_failed",
+                                "passed": False,
+                                "reason": _verdict.get("reason", ""),
+                                "nextAction": _verdict.get("nextAction", ""),
+                            }
+                        )
+                        # The assistant's final text must reach the next model
+                        # call (it was persisted but not re-added to context on
+                        # the tool-less path). Ride it plus the steering nudge as
+                        # user messages — the strict template allows only one
+                        # system row — so the frozen prefix stays byte-stable.
+                        messages.append(
+                            {"role": "assistant", "content": assistant_content}
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Continue working toward the active session "
+                                    f"goal. {_verdict.get('nextAction', '')}"
+                                ),
+                            }
+                        )
+                        continue
 
                 # Replace the mechanical first-message title after a successful
                 # turn. Failures are silent/best-effort; the sidebar receives

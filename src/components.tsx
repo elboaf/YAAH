@@ -1458,6 +1458,32 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
     } catch {
       // not JSON - fall through
     }
+    // #844: post-turn completion verifier verdict. On failure the loop
+    // surfaces the reason and the verifier's steer for the next iteration.
+    try {
+      const parsedGoal: unknown = JSON.parse(msg.content)
+      if (parsedGoal && typeof parsedGoal === 'object' && 'goal' in (parsedGoal as object)) {
+        const goal = ((parsedGoal as { goal: Record<string, unknown> }).goal) as {
+          phase?: string
+          passed?: boolean
+          reason?: string
+          nextAction?: string
+        }
+        const failed = goal.phase === 'verification_failed' || goal.passed === false
+        return (
+          <div className="pl-3 space-y-1">
+            <div className={`font-mono text-[11px] ${failed ? 'text-amber-300/90' : 'text-sky-300/90'}`}>
+              ◆ {failed ? 'Goal not verified' : 'Iteration'}{goal.reason ? ` — ${goal.reason}` : ''}
+            </div>
+            {goal.nextAction ? (
+              <div className="font-mono text-[11px] text-zinc-400">→ {goal.nextAction}</div>
+            ) : null}
+          </div>
+        )
+      }
+    } catch {
+      // not JSON - fall through
+    }
     // Invoked skill the backend registry doesn't know (chip rendered from the
     // UI list which can drift from the backend cache): say so plainly.
     try {
@@ -2562,7 +2588,7 @@ export function RemoteTranscriptDialog({
     streamingRef.current = true
     setSendNote(null)
     const userId = `remote-user-${Date.now()}`
-    const asstId = `remote-asst-${Date.now()}`
+    let asstId = `remote-asst-${Date.now()}`
     const workspace = remoteConversationWorkspace ?? ""
     useAgent.setState((s) => ({
       messagesByConv: {
@@ -2593,6 +2619,43 @@ export function RemoteTranscriptDialog({
           role: 'system',
           content: JSON.stringify({ note: ev.text ?? '' }),
         })
+      } else if (ev.type === 'goal') {
+        // #844: post-turn completion verifier verdict — surface as a system
+        // row (opening a fresh emission for the steered re-run) so the
+        // iteration loop is visible on remote reads too, with the goal row
+        // between the two iterations rather than after both.
+        const g = ev as {
+          phase?: string
+          passed?: boolean
+          reason?: string
+          nextAction?: string
+        }
+        const nextId = useAgent.getState().beginGoalIteration(remoteKey, {
+          phase: g.phase ?? 'verification_failed',
+          passed: g.passed ?? false,
+          reason: g.reason ?? '',
+          nextAction: g.nextAction ?? '',
+        })
+        if (nextId) asstId = nextId
+        else {
+          // Guard failed (last row wasn't an assistant emission): still
+          // surface the verdict, then open a fresh emission so the goal row
+          // sits BETWEEN iterations and the steered re-run attaches to the new
+          // emission, not the pre-goal one.
+          useAgent.getState().appendRawMessage(remoteKey, {
+            id: `remote-goal-${Date.now()}`,
+            role: 'system',
+            content: JSON.stringify({
+              goal: {
+                phase: g.phase ?? 'verification_failed',
+                passed: g.passed ?? false,
+                reason: g.reason ?? '',
+                nextAction: g.nextAction ?? '',
+              },
+            }),
+          })
+          asstId = useAgent.getState().appendAssistantPlaceholder(remoteKey)
+        }
       } else if (ev.type === 'tool_start') {
         useAgent.getState().startToolCall(remoteKey, asstId, ev.call_id ?? `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
         useAgent.getState().setStatus(remoteKey, 'running-tool')
@@ -11795,6 +11858,37 @@ export function Composer({
         role: 'system',
         content: JSON.stringify({ note: ev.text ?? '' }),
       })
+    } else if (ev.type === 'goal') {
+      // #844: the post-turn completion verifier rejected a natural
+      // completion. Flush iteration 1's text, surface the verifier's verdict
+      // as a visible system row, and open a fresh emission for the steered
+      // re-run — so the goal row sits BETWEEN the two iterations (not after
+      // both are concatenated). A silent re-run would otherwise look like the
+      // model just kept going.
+      textDeltas.flush()
+      const goal = {
+        phase: ev.phase ?? 'verification_failed',
+        passed: ev.passed ?? false,
+        reason: ev.reason ?? '',
+        nextAction: ev.nextAction ?? '',
+      }
+      const nextId = useAgent.getState().beginGoalIteration(bufKey, goal)
+      if (nextId) {
+        curId = nextId
+        textSinceTool = true
+      } else {
+        // Last row wasn't an assistant emission (edge case): still surface
+        // the verdict, then open a fresh emission so the goal row sits
+        // BETWEEN iterations and the steered re-run attaches to the new
+        // emission. Reset textSinceTool so the first delta starts fresh.
+        appendRawMessage(bufKey, {
+          id: `goal-${Date.now()}`,
+          role: 'system',
+          content: JSON.stringify({ goal }),
+        })
+        curId = useAgent.getState().appendAssistantPlaceholder(bufKey)
+        textSinceTool = true
+      }
     } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')
       if (ev.text) {

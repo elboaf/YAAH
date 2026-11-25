@@ -428,6 +428,16 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN frozen_voice_gate TEXT"
         )
+    if "session_goal" not in conv_cols:
+        # #844: the conversation's durable objective (the ycode "goal card").
+        # The root user prompt of each turn is stored here and re-injected
+        # into model context every turn as a delimited "untrusted data"
+        # block, so the objective survives session restart and cannot
+        # prompt-inject the harness. Written only by the agent loop, never
+        # exposed through the PATCH API. NULL/empty = feature inactive.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN session_goal TEXT"
+        )
     if "persisted_skill_tail" not in conv_cols:
         # Persisted load_skill tail: the byte-exact "# Loaded skill" tail
         # message a static-mode conversation accumulated through the
@@ -1077,6 +1087,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
         "frozen_voice_gate",
         "persisted_skill_tail",
         "persisted_skill_tail_ws",
+        "session_goal",
         "model",
         "effort",
         "subagent_model",
@@ -1086,6 +1097,12 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
         for k, v in fields.items()
         if k in allowed and v is not None
     }
+    # #844: an empty objective is the same as "no objective" — normalise it
+    # to NULL so the column can never hold a meaningless empty string (the
+    # loop already passes `session_goal or None`; this makes the invariant
+    # hold at the write boundary regardless of caller).
+    if "session_goal" in updates and not updates["session_goal"].strip():
+        updates["session_goal"] = None
     if not updates:
         return False
     if updates.get("model"):

@@ -1614,6 +1614,7 @@ export interface AgentEvent {
     | 'stopped'
     | 'skill_not_found'
     | 'note'
+    | 'goal'
   text?: string
   name?: string
   args?: unknown
@@ -1653,6 +1654,15 @@ export interface AgentEvent {
   note?: string
   /** Inner event type wrapped by sub_agent_progress. */
   kind?: string
+  /** #844 goal+verification: 'verification_failed' (verifier rejected a
+   *  natural completion) or 'iteration' (a re-run was steered by nextAction). */
+  phase?: 'verification_failed' | 'iteration'
+  /** #844: the post-turn completion verifier's pass/fail verdict. */
+  passed?: boolean
+  /** #844: the verifier's explanation for its verdict. */
+  reason?: string
+  /** #844: the verifier's steer for the next iteration. */
+  nextAction?: string
   /** Exact context size (usage.prompt_tokens) of the turn's final model call. */
   usage_tokens?: number
   /** Turn's accumulated billed cost so far (#627). Old frontends only. */

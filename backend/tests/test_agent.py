@@ -407,6 +407,13 @@ async def test_title_skips_renamed_and_agent_chats(fake_model, tmp_path, monkeyp
         return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
 
     monkeypatch.setattr(loop.model_client, "chat", routed)
+    # #844: the completion verifier also issues a stream=False chat call; keep
+    # it off so this test measures only the title call.
+    from backend.agent import config as config_mod
+    monkeypatch.setattr(
+        loop, "load_config",
+        lambda: {**config_mod.DEFAULTS, "completion_verifier": False},
+    )
     events = await collect(loop.run_agent(cid, "hello there agent", str(tmp_path)))
     assert not [e for e in events if e["type"] == "title"]
     assert calls == []
@@ -434,6 +441,13 @@ async def test_title_failure_keeps_slice_and_retries_next_turn(fake_model, tmp_p
         return FakeStream([{"type": "content", "text": "ok"}, {"type": "finish"}])
 
     monkeypatch.setattr(loop.model_client, "chat", routed)
+    # #844: the completion verifier also issues a stream=False chat call; keep
+    # it off so this test measures only the title calls.
+    from backend.agent import config as config_mod
+    monkeypatch.setattr(
+        loop, "load_config",
+        lambda: {**config_mod.DEFAULTS, "completion_verifier": False},
+    )
     for prompt in ("debug crash on startup", "I have another detail"):
         events = await collect(loop.run_agent(cid, prompt, str(tmp_path)))
         assert not [e for e in events if e["type"] == "title"]
