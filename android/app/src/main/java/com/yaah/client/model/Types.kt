@@ -26,6 +26,7 @@ data class ConversationItem(
 data class ConversationDetails(
     val conversation_id: String,
     val workspace_id: String,
+    val workspace: String? = null,
     val title: String,
     val chat_type: String,
     val revision: String,

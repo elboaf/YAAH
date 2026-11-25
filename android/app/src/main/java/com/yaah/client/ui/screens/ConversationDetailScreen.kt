@@ -25,6 +25,7 @@ fun ConversationDetailScreen(
     host: HostEntry,
     onBack: () -> Unit
 ) {
+    var workspace by remember { mutableStateOf(workspaceId) }
     var details by remember { mutableStateOf<ConversationDetails?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -110,8 +111,11 @@ fun ConversationDetailScreen(
                                         sending = true
                                         input = ""
                                         scope.launch {
-                                            sendChatMessage(host, convId, msg, workspaceId)
-                                            loadDetails(scope, host, convId, { details = it }, { }, { error = it })
+                                            sendChatMessage(host, convId, msg, workspace)
+                                            loadDetails(scope, host, convId, {
+                                                details = it
+                                                it?.workspace?.let { w -> workspace = w }
+                                            }, { }, { error = it })
                                             sending = false
                                         }
                                     },
