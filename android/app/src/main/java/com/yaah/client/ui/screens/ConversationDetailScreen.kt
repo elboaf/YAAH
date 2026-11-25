@@ -17,8 +17,6 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.unit.dp
 import com.yaah.client.api.YaahClient
 import com.yaah.client.model.ConversationDetails
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.*
 
 @OptIn(ExperimentalMaterial3Api::class)
