@@ -422,6 +422,30 @@ async def _race_stream_iter(stream, cancel_ev: asyncio.Event | None):
 DEFAULT_MAX_STEPS = 200
 
 
+def _step_budget_message(max_steps: int) -> str:
+    """The system message posted when a turn exhausts its step budget.
+
+    Names only surfaces that exist: the per-model max steps in Settings →
+    Providers (each model entry), and config.json `max_steps` (0 = unlimited).
+    The old "Settings → General → Max steps" pointer named a tab/field that
+    does not exist, so following it led nowhere (#838).
+
+    The body explains precedence (see _resolve_max_steps): a per-model or
+    per-provider value overrides the global, so when the effective budget is
+    not the default the user should change that override, not the global."""
+    # Precedence (see _resolve_max_steps): a model-level or provider-level
+    # value wins over the global, so if the effective budget below is not
+    # DEFAULT_MAX_STEPS the global value is not what you want to touch.
+    note = (
+        f"Step budget ({max_steps}) exhausted — raise it. A per-model or "
+        "per-provider max steps value overrides the global, so if the "
+        "effective budget is not the default, change that override (Settings "
+        "→ Providers). Otherwise raise the global Settings → Providers "
+        "(per-model max steps) or config.json `max_steps` (0 = unlimited)."
+    )
+    return note
+
+
 def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
     """Step budget for one turn: the model's own entry (config.model_steps)
     wins, then the global; missing or invalid values fall through, and
@@ -429,6 +453,8 @@ def _resolve_max_steps(cfg: dict, model_override: str | None) -> int:
     unlimited and is honored, not skipped."""
     model = model_override or ""
     provider = model.partition("::")[0] if "::" in model else ""
+    if not model:
+        model = cfg.get("model") or ""
     if not provider:
         provider = cfg.get("active_provider") or ""
 
@@ -3339,10 +3365,7 @@ async def _run_agent_claimed(
                         }
                     )
 
-        budget_msg = (
-            f"Step budget ({max_steps}) exhausted — raise it in "
-            "Settings → General → Max steps (or config.json `max_steps`; 0 = unlimited)"
-        )
+        budget_msg = _step_budget_message(max_steps)
         await add_message(conversation_id, "system", f"turn failed: {budget_msg}")
         async for _fev in _finalize_file_changes():
             yield _fev

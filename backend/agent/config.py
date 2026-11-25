@@ -38,7 +38,6 @@ DEFAULTS = {
     # New-chat reasoning effort is selected from the sidebar, not Settings.
     "reasoning_effort": "",
     # Agent loop tool-call rounds per turn (Settings -> General -> Max steps).
-    "max_steps": 20,
     # Pre-PR verification: run deterministic checks before push/PR.
     # No check list here — check selection is marker-gated per workspace
     # in prepr.default_checks (a Python repo must not run npm eslint).

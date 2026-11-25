@@ -67,3 +67,26 @@ def test_resolve_max_steps_model_wins():
     assert _resolve_max_steps({"model_steps": {"acme::x": 0}}, "acme::x") == 0
     # Bad values fall back to the shipped default.
     assert _resolve_max_steps({"max_steps": "nonsense"}, "x") == 200
+
+def test_default_model_per_model_entry_honored():
+    """CodeRabbit finding: when no model override is given (default turn),
+    the per-model entry saved for the active default model must be honored,
+    not just the provider-level entry. The user sets 'max steps' on the
+    default model in Settings -> Providers, so that must be what runs."""
+    from backend.agent.loop import _resolve_max_steps
+
+    cfg = {
+        "active_provider": "acme",
+        "model": "acme::default-model",
+        "providers": {
+            "acme": {"model": "acme::default-model", "max_steps": 150}
+        },
+        "model_steps": {"acme::default-model": 40}
+    }
+    # No override = default model turn
+    assert _resolve_max_steps(cfg, None) == 40
+    assert _resolve_max_steps(cfg, "") == 40
+    # Explicit override of the same model also gets 40
+    assert _resolve_max_steps(cfg, "acme::default-model") == 40
+    # A different model without its own entry falls back to provider level
+    assert _resolve_max_steps(cfg, "acme::other-model") == 150
