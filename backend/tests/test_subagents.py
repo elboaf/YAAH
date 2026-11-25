@@ -494,6 +494,50 @@ async def test_sub_agent_first_byte_after_delay_completes(tmp_path, monkeypatch)
     assert result["output"] == "done"
 
 
+@pytest.mark.asyncio
+async def test_sub_agent_unknown_cost_stays_unknown(tmp_path, monkeypatch):
+    # A provider that returns content + finish but no usage.cost must leave
+    # cost_spent omitted (unknown), not collapsed to a known zero. This is the
+    # distinction the UI reads: absent cost_spent == unknown, cost_spent: 0.0
+    # == known zero.
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 5.0)
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return FakeStream([
+            {"type": "content", "text": "done"},
+            {"type": "finish"},
+        ])
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "do it", str(tmp_path)
+    )
+    assert result["status"] == "completed"
+    assert result["output"] == "done"
+    assert "cost_spent" not in result
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_explicit_zero_cost_preserved(tmp_path, monkeypatch):
+    # An explicitly reported zero cost must survive as cost_spent: 0.0 (known),
+    # distinct from the unknown case above.
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 5.0)
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return FakeStream([
+            {"type": "content", "text": "done"},
+            {"type": "usage", "usage": {"cost": 0.0, "completion_tokens": 0}},
+            {"type": "finish"},
+        ])
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "do it", str(tmp_path)
+    )
+    assert result["status"] == "completed"
+    assert result["cost_spent"] == 0.0
+
+
 class _YieldingStream:
     """A stream that yields to the loop between chunks, like a real SSE
     provider (each chunk is a separate network read). This is what exposes

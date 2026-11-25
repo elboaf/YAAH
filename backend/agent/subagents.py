@@ -904,7 +904,11 @@ async def run_sub_agent(
                 messages, tools, sub_model, cancel_ev, on_event, conversation_id,
             )
             # #1245: fold this turn's billed spend into the sub-agent total.
-            sub_cost = (sub_cost or 0.0) + (turn_cost or 0.0)
+            # A None turn_cost means the provider did not report usage.cost --
+            # genuinely unknown, kept distinguishable from a known zero -- so
+            # only sum it in when it was actually reported.
+            if turn_cost is not None:
+                sub_cost = (sub_cost or 0.0) + turn_cost
             if outcome == "hung" and not cancel_ev.is_set():
                 status = "hung"
                 final_text = (
@@ -987,7 +991,10 @@ async def run_sub_agent(
                     error = f"{type(e).__name__}: {e}"
                     g_outcome = "error"
                 # #1245: fold the grace turn's billed spend into the total.
-                sub_cost = (sub_cost or 0.0) + (g_turn_cost or 0.0)
+                # Same None rule as the regular turn: an unreported cost stays
+                # unknown, a reported (even explicitly zero) cost is summed.
+                if g_turn_cost is not None:
+                    sub_cost = (sub_cost or 0.0) + g_turn_cost
                 if g_outcome == "error":
                     pass
                 elif g_outcome == "hung" and not cancel_ev.is_set():
