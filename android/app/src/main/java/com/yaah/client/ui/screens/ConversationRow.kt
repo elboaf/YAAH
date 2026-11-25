@@ -17,7 +17,7 @@ fun ConversationRow(conv: ConversationItem, onClick: () -> Unit) {
         onClick = onClick
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(conv.title, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+            Text(conv.title ?: "Untitled", style = MaterialTheme.typography.titleMedium, maxLines = 1)
             if (!conv.workspace.isNullOrBlank()) {
                 Text(
                     conv.workspace,

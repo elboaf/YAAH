@@ -3,6 +3,7 @@ package com.yaah.client.ui.screens
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Send
@@ -31,9 +32,19 @@ fun ConversationDetailScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var sending by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
 
     LaunchedEffect(convId) {
         loadDetails(scope, host, convId, { details = it }, { loading = false }, { error = it })
+    }
+
+    LaunchedEffect(details?.messages?.size) {
+        // Newest message last; auto-scroll to the bottom on load / when a new
+        // message arrives. The user can still scroll up to read older ones.
+        val count = details?.messages?.size ?: 0
+        if (count > 0) {
+            listState.animateScrollToItem(index = count - 1)
+        }
     }
 
     Scaffold(
@@ -77,11 +88,12 @@ fun ConversationDetailScreen(
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(8.dp)
                 ) {
-                    details?.messages?.let { msgs ->
-                        items(msgs) { msg ->
-                            FormattedMessageBubble(msg, isUser = msg.role == "user")
-                            Spacer(modifier = Modifier.height(4.dp))
-                        }
+                    // Newest last: render oldest-first messages reversed so the
+                    // newest sits at the bottom.
+                    val ordered = details?.messages?.reversed() ?: emptyList()
+                    items(ordered) { msg ->
+                        FormattedMessageBubble(msg, isUser = msg.role == "user")
+                        Spacer(modifier = Modifier.height(4.dp))
                     }
                 }
 

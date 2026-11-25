@@ -11,7 +11,7 @@ data class HostInfo(
 
 data class ConversationItem(
     val id: Int,
-    val title: String,
+    val title: String? = null,
     val workspace: String?,
     val created_at: String?,
     val updated_at: String?,
