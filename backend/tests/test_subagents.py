@@ -494,6 +494,81 @@ async def test_sub_agent_first_byte_after_delay_completes(tmp_path, monkeypatch)
     assert result["output"] == "done"
 
 
+class _YieldingStream:
+    """A stream that yields to the loop between chunks, like a real SSE
+    provider (each chunk is a separate network read). This is what exposes
+    the watchdog truncation bug: a non-yielding stream consumes in one shot
+    and never trips the early-exit path."""
+
+    def __init__(self, events):
+        self._events = list(events)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._events:
+            raise StopAsyncIteration
+        await asyncio.sleep(0.02)
+        return self._events.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_multi_chunk_stream_not_truncated(tmp_path, monkeypatch):
+    # A stream that keeps producing well within the window must complete with
+    # ALL content preserved -- the watchdog must never cancel it just because
+    # the first byte arrived.
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 5.0)
+
+    async def fake_chat(messages, tools=None, stream=True):
+        return _YieldingStream([
+            {"type": "content", "text": "alpha"},
+            {"type": "content", "text": "beta"},
+            {"type": "content", "text": "gamma"},
+            {"type": "finish"},
+        ])
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    result = await subagents.run_sub_agent(
+        subagents.get_agent_def("explore"), "go", str(tmp_path)
+    )
+    assert result["status"] == "completed", result
+    assert result["output"] == "alphabeta" + "gamma", result["output"]
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_grace_turn_hang_is_surfaced(tmp_path, monkeypatch):
+    # A sub that burns its whole turn budget on tool calls then hangs on the
+    # final grace call must surface "hung" -- the grace call gets the same
+    # first-byte watchdog protection as every other turn.
+    agent = subagents.get_agent_def("explore")
+    monkeypatch.setattr(agent, "max_turns", 1)
+
+    state = {"n": 0}
+
+    async def fake_chat(messages, tools=None, stream=True):
+        state["n"] += 1
+        if state["n"] == 1:
+            # Turn 0: a tool call so the loop exhausts and fires the grace turn.
+            return FakeStream([
+                {"type": "tool_calls", "tool_calls": [{
+                    "id": "g1", "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }]},
+                {"type": "finish", "reason": "tool_calls"},
+            ])
+        # Grace turn: never yields a first byte.
+        return _SlowStream()
+
+    monkeypatch.setattr(subagents.model_client, "chat", fake_chat)
+    monkeypatch.setattr(subagents, "SUB_AGENT_NO_FIRST_BYTE_TIMEOUT", 0.05)
+    result = await subagents.run_sub_agent(
+        agent, "go", str(tmp_path)
+    )
+    assert result["status"] == "hung", result
+    assert "no response" in result["output"]
+
+
 async def _stream_coro(events):
     class _S:
         def __aiter__(self):

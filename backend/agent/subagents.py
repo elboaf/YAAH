@@ -70,10 +70,9 @@ SPAWN_GRACE_SECONDS = 10.0
 # would otherwise keep the sub silent for up to CHAT_READ_TIMEOUT (3600s)
 # while the parent blocks on the batch with no stage visibility. This is a
 # UI-liveness guard, not a correctness one: a slow-but-live provider that
-# produces content after the window still completes normally; a sub that
-# makes NO model call at all is exempt. The hang is surfaced as a distinct
-# status so the chip can render "no response from <provider>" instead of
-# pulsing "running" forever.
+# emits its first byte WITHIN the window completes normally; a sub that
+# sends nothing within the window is surfaced as hung. A sub that makes NO
+# model call at all is exempt (the watchdog only starts when a call does).
 SUB_AGENT_NO_FIRST_BYTE_TIMEOUT = 60.0
 
 
@@ -466,19 +465,178 @@ def _resolve_subagent_model(chat_scope: str | None = None) -> tuple[str, str]:
     return raw, ""
 
 
-async def _watchdog_first_byte(
-    first_byte_event: asyncio.Event, hung_event: asyncio.Event,
-) -> None:
-    """Watch for the sub's first response byte. If none arrives within
-    SUB_AGENT_NO_FIRST_BYTE_TIMEOUT, set hung_event so the parent can
-    surface the sub as hung. If the first byte arrives first, the event
-    is set by the stream consumer and this task resolves without setting
-    hung_event. A sub that makes no model call at all never starts the
-    race, so it is exempt."""
+async def _run_sub_agent_turn(
+    messages: list[dict],
+    tools: list[dict],
+    sub_model: str,
+    cancel_ev: asyncio.Event,
+    on_event,
+    conversation_id: int | None,
+) -> tuple[str, dict, list[str], float | None]:
+    """Run one sub-agent model call and return (outcome, state, acc, cost).
+
+
+    The call is raced against parent cancellation and a first-byte
+    watchdog. `state`/`acc` are this turn's (returned so the caller can
+    read the streamed content and tool calls):
+
+    - "completed": the stream finished on its own. A ModelError propagates
+      out of the call. The watchdog never truncates a stream that keeps
+      producing -- it only fires on total silence past the window -- so a
+      multi-chunk stream is consumed in full.
+    - "cancelled": a parent Stop interrupted the in-flight stream.
+    - "hung": no first byte arrived within
+      SUB_AGENT_NO_FIRST_BYTE_TIMEOUT; the stream was cancelled.
+
+    The same helper is used for the grace turn, so the final call gets the
+    same hang protection as every other. `cost` is this turn's billed spend,
+    returned so the caller can sum it into the sub-agent's total (the DB
+    write happens here, per #1245).
+    """
+    state: dict = {"content": "", "tool_calls": None, "finish": None}
+    acc: list[str] = []
+    # Per-turn billed spend, accumulated here and returned to the caller.
+    turn_cost: float | None = None
+
+    async def _consume_stream(stream) -> None:
+        # Consume one model stream into state/acc.
+        nonlocal turn_cost
+        async for ev in stream:
+            if cancel_ev.is_set():
+                return
+            if ev["type"] in {"content", "thinking", "tool_calls"}:
+                # First real response byte: arm the watchdog's early exit so
+                # a slow-but-live provider is never misclassified as hung.
+                first_byte_event.set()
+            if ev["type"] == "content":
+                acc.append(ev["text"])
+                if on_event:
+                    on_event({"type": "text", "text": ev["text"]})
+            elif ev["type"] == "thinking":
+                # UI-only telemetry; never record reasoning in the transcript.
+                if on_event:
+                    on_event({"type": "thinking", "text": ev.get("text", "")})
+            elif ev["type"] == "tool_calls":
+                state["tool_calls"] = ev["tool_calls"]
+            elif ev["type"] == "finish":
+                state["finish"] = ev.get("reason")
+            elif ev["type"] == "usage":
+                # #1245: persist the sub's billed spend at the POINT OF
+                # BILLING, exactly as the parent loop does. A sub-agent's
+                # calls are billed too, and a cancelled or errored sub
+                # keeps the spend of the calls it already made.
+                # add_conversation_cost is an atomic increment, so the
+                # per-call writes sum correctly alongside the parent's.
+                _u = ev.get("usage") or {}
+                call_cost = _u.get("cost")
+                if call_cost is not None:
+                    try:
+                        call_cost = float(call_cost)
+                    except (TypeError, ValueError):
+                        call_cost = None
+                if call_cost is not None:
+                    turn_cost = (turn_cost or 0.0) + call_cost
+                if conversation_id is not None and (
+                    call_cost is not None
+                    or (_u.get("completion_tokens", 0) or 0)
+                ):
+                    # Cancellation-safe (#1245): this consumer runs as a
+                    # task the parent Stop cancels (see the consume/cancel
+                    # race below), and CancelledError is a BaseException --
+                    # so a cancel landing inside the write would skip
+                    # commit() and silently DISCARD the increment while the
+                    # provider had already billed the call. Shield the
+                    # write, then drain it before re-raising, so the spend
+                    # of a cancelled sub-agent turn is durably recorded.
+                    _cost_task = asyncio.ensure_future(
+                        add_conversation_cost(
+                            conversation_id,
+                            call_cost,
+                            int(_u.get("completion_tokens", 0) or 0),
+                        )
+                    )
+                    try:
+                        await asyncio.shield(_cost_task)
+                    except asyncio.CancelledError:
+                        # Let the shielded write finish, then propagate.
+                        try:
+                            await _cost_task
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise
+                    except Exception:  # noqa: BLE001
+                        # Best-effort: cost tracking must not fail the sub.
+                        pass
+
+    async def _consume() -> None:
+        stream = await model_client.chat(
+            messages, tools=tools, stream=True,
+            **({"model": sub_model} if sub_model else {}),
+        )
+        await _consume_stream(stream)
+
+    # Race the model call against cancellation only. A parent Stop must
+    # interrupt an in-flight sub-agent model call promptly, not wait for the
+    # stream to end on its own.
+    consume_task = asyncio.create_task(_consume())
+    cancel_task = asyncio.create_task(cancel_ev.wait())
+
+    # A separate watchdog: if the model call sends no first response byte
+    # within the window (dead single slot, issue #550) it cancels the
+    # consume task and flags the turn hung -- a hang that would otherwise
+    # keep the sub silent for up to CHAT_READ_TIMEOUT with the parent
+    # blocking on the batch and no stage visibility. It is deliberately NOT
+    # in the asyncio.wait race: completing it when the first byte arrives
+    # must not itself end the turn, only total silence past the window does.
+    # `watchdog_fired` is the single source of truth for whether the watchdog
+    # cancelled the stream -- checking consume_task.done() is not enough,
+    # because a watchdog cancel also makes consume_task done.
+    first_byte_event = asyncio.Event()
+    watchdog_fired = False
+
+    async def _watchdog() -> None:
+        nonlocal watchdog_fired
+        try:
+            await asyncio.wait_for(
+                first_byte_event.wait(), timeout=SUB_AGENT_NO_FIRST_BYTE_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            watchdog_fired = True
+            consume_task.cancel()
+
+    watch_task = asyncio.create_task(_watchdog())
     try:
-        await asyncio.wait_for(first_byte_event.wait(), timeout=SUB_AGENT_NO_FIRST_BYTE_TIMEOUT)
-    except asyncio.TimeoutError:
-        hung_event.set()
+        done, _ = await asyncio.wait(
+            {consume_task, cancel_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if consume_task in done and not watchdog_fired:
+            # The stream finished on its own. Propagate a ModelError; this
+            # wins over a late watchdog or cancel.
+            consume_task.result()
+        elif cancel_task in done:
+            # A parent Stop interrupts the in-flight stream promptly.
+            consume_task.cancel()
+            try:
+                await consume_task
+            except (asyncio.CancelledError, model_client.ModelError):
+                pass
+        # else: the watchdog fired -- consume_task was cancelled by it, and
+        # is drained in the finally below.
+    finally:
+        cancel_task.cancel()
+        watch_task.cancel()
+        if not consume_task.done():
+            consume_task.cancel()
+            try:
+                await consume_task
+            except (asyncio.CancelledError, model_client.ModelError):
+                pass
+
+    if watchdog_fired and not cancel_ev.is_set():
+        return ("hung", state, acc, turn_cost)
+    if cancel_ev.is_set():
+        return ("cancelled", state, acc, turn_cost)
+    return ("completed", state, acc, turn_cost)
 
 
 async def run_sub_agent(
@@ -577,76 +735,6 @@ async def run_sub_agent(
         return entry
 
     _record("user", prompt)
-
-    async def _consume_stream(stream) -> None:
-        # Consume one model stream into the per-turn acc/state closures.
-        nonlocal sub_cost
-        async for ev in stream:
-            if cancel_ev.is_set():
-                return
-            if ev["type"] in {"content", "thinking", "tool_calls"}:
-                # First real response byte: arm the watchdog's early exit so
-                # a slow-but-live provider is never misclassified as hung.
-                first_byte_event.set()
-            if ev["type"] == "content":
-                acc.append(ev["text"])
-                if on_event:
-                    on_event({"type": "text", "text": ev["text"]})
-            elif ev["type"] == "thinking":
-                # UI-only telemetry; never record reasoning in the transcript.
-                if on_event:
-                    on_event({"type": "thinking", "text": ev.get("text", "")})
-            elif ev["type"] == "tool_calls":
-                state["tool_calls"] = ev["tool_calls"]
-            elif ev["type"] == "finish":
-                state["finish"] = ev.get("reason")
-            elif ev["type"] == "usage":
-                # #1245: persist the sub's billed spend at the POINT OF
-                # BILLING, exactly as the parent loop does. A sub-agent's
-                # calls are billed too, and a cancelled or errored sub
-                # keeps the spend of the calls it already made.
-                # add_conversation_cost is an atomic increment, so the
-                # per-call writes sum correctly alongside the parent's.
-                _u = ev.get("usage") or {}
-                call_cost = _u.get("cost")
-                if call_cost is not None:
-                    try:
-                        call_cost = float(call_cost)
-                    except (TypeError, ValueError):
-                        call_cost = None
-                if call_cost is not None:
-                    sub_cost = (sub_cost or 0.0) + call_cost
-                if conversation_id is not None and (
-                    call_cost is not None
-                    or (_u.get("completion_tokens", 0) or 0)
-                ):
-                    # Cancellation-safe (#1245): this consumer runs as a
-                    # task the parent Stop cancels (see the consume/cancel
-                    # race below), and CancelledError is a BaseException --
-                    # so a cancel landing inside the write would skip
-                    # commit() and silently DISCARD the increment while the
-                    # provider had already billed the call. Shield the
-                    # write, then drain it before re-raising, so the spend
-                    # of a cancelled sub-agent turn is durably recorded.
-                    _cost_task = asyncio.ensure_future(
-                        add_conversation_cost(
-                            conversation_id,
-                            call_cost,
-                            int(_u.get("completion_tokens", 0) or 0),
-                        )
-                    )
-                    try:
-                        await asyncio.shield(_cost_task)
-                    except asyncio.CancelledError:
-                        # Let the shielded write finish, then propagate.
-                        try:
-                            await _cost_task
-                        except Exception:  # noqa: BLE001
-                            pass
-                        raise
-                    except Exception:  # noqa: BLE001
-                        # Best-effort: cost tracking must not fail the sub.
-                        pass
 
     async def _exec_tool_calls(tool_calls, *, interruptible: bool) -> bool:
         """Execute a turn's tool calls, appending tool results to messages.
@@ -806,72 +894,24 @@ async def run_sub_agent(
                     messages.append({"role": "user", "content": note})
                     nudge_idx = len(messages) - 1
 
-            state: dict = {"content": "", "tool_calls": None, "finish": None}
-            acc: list[str] = []
-
-            async def _consume():
-                stream = await model_client.chat(
-                    messages, tools=tools, stream=True,
-                    **({"model": sub_model} if sub_model else {}),
-                )
-                await _consume_stream(stream)
-
-            # Race the model call against cancellation and a first-byte
-            # watchdog: a parent Stop must interrupt an in-flight sub-agent
-            # model call promptly, not wait for the stream to end on its own.
-            # The watchdog fires when the model call sends no first response
-            # byte within SUB_AGENT_NO_FIRST_BYTE_TIMEOUT (dead single slot,
-            # issue #550) — a hang that would otherwise keep the sub silent
-            # for up to CHAT_READ_TIMEOUT with the parent blocking on the
-            # batch and no stage visibility.
-            consume_task = asyncio.create_task(_consume())
-            cancel_task = asyncio.create_task(cancel_ev.wait())
-            first_byte_event = asyncio.Event()
-            hung_event = asyncio.Event()
-            hang_task = asyncio.create_task(
-                _watchdog_first_byte(first_byte_event, hung_event)
+            # One model call for this turn, raced against parent cancellation
+            # and a first-byte watchdog. A sub that sends no first response
+            # byte within the window (dead single slot, issue #550) is
+            # surfaced as hung instead of pulsing "running" for up to
+            # CHAT_READ_TIMEOUT; a stream that keeps producing is consumed in
+            # full (the watchdog never truncates it).
+            outcome, state, acc, turn_cost = await _run_sub_agent_turn(
+                messages, tools, sub_model, cancel_ev, on_event, conversation_id,
             )
-            try:
-                done, _ = await asyncio.wait(
-                    {consume_task, cancel_task, hang_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+            # #1245: fold this turn's billed spend into the sub-agent total.
+            sub_cost = (sub_cost or 0.0) + (turn_cost or 0.0)
+            if outcome == "hung" and not cancel_ev.is_set():
+                status = "hung"
+                final_text = (
+                    f"[sub-agent: no response from {sub_model or 'provider'} "
+                    f"after {int(SUB_AGENT_NO_FIRST_BYTE_TIMEOUT)}s]"
                 )
-                if cancel_task in done and consume_task not in done:
-                    consume_task.cancel()
-                    try:
-                        await consume_task
-                    except (asyncio.CancelledError, model_client.ModelError):
-                        pass
-                elif consume_task in done:
-                    # Propagate a ModelError from the consumed task.
-                    consume_task.result()
-                elif hung_event.is_set():
-                    # No first byte in the window. If the parent already
-                    # requested a stop, treat the silence as a cancellation
-                    # (the partial-turn bookkeeping below still applies);
-                    # otherwise the sub genuinely hung — surface it as such
-                    # instead of pulsing "running" for up to CHAT_READ_TIMEOUT.
-                    consume_task.cancel()
-                    try:
-                        await consume_task
-                    except (asyncio.CancelledError, model_client.ModelError):
-                        pass
-                    if not cancel_ev.is_set():
-                        status = "hung"
-                        final_text = (
-                            f"[sub-agent: no response from {sub_model or 'provider'} "
-                            f"after {int(SUB_AGENT_NO_FIRST_BYTE_TIMEOUT)}s]"
-                        )
-                        break
-            finally:
-                cancel_task.cancel()
-                hang_task.cancel()
-                if not consume_task.done():
-                    consume_task.cancel()
-                    try:
-                        await consume_task
-                    except (asyncio.CancelledError, model_client.ModelError):
-                        pass
+                break
             if cancel_ev.is_set():
                 status = "cancelled"
                 # Cancellation mid-stream: keep whatever the model said
@@ -927,56 +967,86 @@ async def run_sub_agent(
                         ),
                     }
                 )
-                state = {"content": "", "tool_calls": None, "finish": None}
-                acc = []
+                # Same race as every turn: the grace call gets the same
+                # first-byte watchdog protection, so a hang in the final call
+                # is surfaced too (issue #550), not left blocking for up to
+                # CHAT_READ_TIMEOUT.
+                # Resolved as a plain if/elif chain (a `break` is not valid in
+                # a for-else else-clause).
+                g_outcome: str = "completed"
+                g_turn_cost: float | None = None
                 try:
-                    stream = await model_client.chat(
-                        messages, tools=tools, stream=True,
-                        **({"model": sub_model} if sub_model else {}),
+                    g_outcome, g_state, g_acc, g_turn_cost = (
+                        await _run_sub_agent_turn(
+                            messages, tools, sub_model, cancel_ev, on_event,
+                            conversation_id,
+                        )
                     )
-                    await _consume_stream(stream)
                 except model_client.ModelError as e:
                     status = "error"
                     error = f"{type(e).__name__}: {e}"
-                if cancel_ev.is_set():
-                    status = "cancelled"
-                content = "".join(acc)
-                tool_calls = state["tool_calls"]
-                _record("assistant", content, tool_calls=tool_calls,
-                        note="grace turn (budget exhausted)")
-                if tool_calls:
-                    # Execute the grace turn's tool calls, then stop
-                    # regardless — the grace turn is the last one.
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": content,
-                            "tool_calls": tool_calls,
-                        }
-                    )
-                    # Not interruptible: the grace turn is the final call,
-                    # its tool calls run to completion.
-                    await _exec_tool_calls(tool_calls, interruptible=False)
-                    status = "max_turns"
-                    final_text = content or (
-                        "[sub-agent hit its turn budget; grace turn ended on "
-                        "tool calls without a final answer]"
+                    g_outcome = "error"
+                # #1245: fold the grace turn's billed spend into the total.
+                sub_cost = (sub_cost or 0.0) + (g_turn_cost or 0.0)
+                if g_outcome == "error":
+                    pass
+                elif g_outcome == "hung" and not cancel_ev.is_set():
+                    status = "hung"
+                    final_text = (
+                        f"[sub-agent: no response from {sub_model or 'provider'} "
+                        f"after {int(SUB_AGENT_NO_FIRST_BYTE_TIMEOUT)}s] "
+                        "(grace turn)"
                     )
                     grace_note = (
-                        "hit turn budget; grace turn ended on tool calls "
-                        "without a final answer"
+                        "hung on the grace turn: no response from the provider"
                     )
+                elif g_outcome == "cancelled":
+                    status = "cancelled"
+                    partial = "".join(g_acc)
+                    if partial:
+                        _record(
+                            "assistant", partial, tool_calls=g_state["tool_calls"],
+                            note="grace turn interrupted mid-stream",
+                        )
+                        final_text = partial
                 else:
-                    if content:
+                    content = "".join(g_acc)
+                    tool_calls = g_state["tool_calls"]
+                    _record("assistant", content, tool_calls=tool_calls,
+                            note="grace turn (budget exhausted)")
+                    if tool_calls:
+                        # Execute the grace turn's tool calls, then stop
+                        # regardless — the grace turn is the last one.
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": content,
+                                "tool_calls": tool_calls,
+                            }
+                        )
+                        # Not interruptible: the grace turn is the final call,
+                        # its tool calls run to completion.
+                        await _exec_tool_calls(tool_calls, interruptible=False)
+                        status = "max_turns"
+                        final_text = content or (
+                            "[sub-agent hit its turn budget; grace turn ended on "
+                            "tool calls without a final answer]"
+                        )
                         grace_note = (
-                            "hit turn budget; produced output in a final "
-                            "wrap-up turn"
+                            "hit turn budget; grace turn ended on tool calls "
+                            "without a final answer"
                         )
                     else:
-                        grace_note = "hit turn budget without a final answer"
-                    final_text = content or (
-                        "[sub-agent hit its turn budget without a final answer]"
-                    )
+                        if content:
+                            grace_note = (
+                                "hit turn budget; produced output in a final "
+                                "wrap-up turn"
+                            )
+                        else:
+                            grace_note = "hit turn budget without a final answer"
+                        final_text = content or (
+                            "[sub-agent hit its turn budget without a final answer]"
+                        )
     except Exception as e:  # noqa: BLE001 — a sub-agent must never kill the parent
         status = "error"
         error = f"{type(e).__name__}: {e}"
