@@ -1458,6 +1458,32 @@ const MessageView = memo(function MessageView({ msg, live }: { msg: ChatMessage;
     } catch {
       // not JSON - fall through
     }
+    // #844: post-turn completion verifier verdict. On failure the loop
+    // surfaces the reason and the verifier's steer for the next iteration.
+    try {
+      const parsedGoal: unknown = JSON.parse(msg.content)
+      if (parsedGoal && typeof parsedGoal === 'object' && 'goal' in (parsedGoal as object)) {
+        const goal = ((parsedGoal as { goal: Record<string, unknown> }).goal) as {
+          phase?: string
+          passed?: boolean
+          reason?: string
+          nextAction?: string
+        }
+        const failed = goal.phase === 'verification_failed' || goal.passed === false
+        return (
+          <div className="pl-3 space-y-1">
+            <div className={`font-mono text-[11px] ${failed ? 'text-amber-300/90' : 'text-sky-300/90'}`}>
+              ◆ {failed ? 'Goal not verified' : 'Iteration'}{goal.reason ? ` — ${goal.reason}` : ''}
+            </div>
+            {goal.nextAction ? (
+              <div className="font-mono text-[11px] text-zinc-400">→ {goal.nextAction}</div>
+            ) : null}
+          </div>
+        )
+      }
+    } catch {
+      // not JSON - fall through
+    }
     // Invoked skill the backend registry doesn't know (chip rendered from the
     // UI list which can drift from the backend cache): say so plainly.
     try {
@@ -2592,6 +2618,27 @@ export function RemoteTranscriptDialog({
           id: `remote-note-${Date.now()}`,
           role: 'system',
           content: JSON.stringify({ note: ev.text ?? '' }),
+        })
+      } else if (ev.type === 'goal') {
+        // #844: post-turn completion verifier verdict — surface as a system
+        // row so the iteration loop is visible on remote reads too.
+        const g = ev as {
+          phase?: string
+          passed?: boolean
+          reason?: string
+          nextAction?: string
+        }
+        useAgent.getState().appendRawMessage(remoteKey, {
+          id: `remote-goal-${Date.now()}`,
+          role: 'system',
+          content: JSON.stringify({
+            goal: {
+              phase: g.phase ?? 'verification_failed',
+              passed: g.passed ?? false,
+              reason: g.reason ?? '',
+              nextAction: g.nextAction ?? '',
+            },
+          }),
         })
       } else if (ev.type === 'tool_start') {
         useAgent.getState().startToolCall(remoteKey, asstId, ev.call_id ?? `tc-${Date.now()}`, ev.name ?? 'tool', ev.args)
@@ -11794,6 +11841,23 @@ export function Composer({
         id: `note-${Date.now()}`,
         role: 'system',
         content: JSON.stringify({ note: ev.text ?? '' }),
+      })
+    } else if (ev.type === 'goal') {
+      // #844: the post-turn completion verifier rejected a natural
+      // completion. Surface the verifier's verdict and its steer as a visible
+      // system row so the iteration loop is seen (a silent re-run would look
+      // like the model just kept going), not swallowed into the turn.
+      appendRawMessage(bufKey, {
+        id: `goal-${Date.now()}`,
+        role: 'system',
+        content: JSON.stringify({
+          goal: {
+            phase: ev.phase ?? 'verification_failed',
+            passed: ev.passed ?? false,
+            reason: ev.reason ?? '',
+            nextAction: ev.nextAction ?? '',
+          },
+        }),
       })
     } else if (ev.type === 'text') {
       setStatus(bufKey, 'thinking')
