@@ -88,10 +88,7 @@ fun ConversationDetailScreen(
                     modifier = Modifier.weight(1f),
                     contentPadding = PaddingValues(8.dp)
                 ) {
-                    // Newest last: render oldest-first messages reversed so the
-                    // newest sits at the bottom.
-                    val ordered = details?.messages?.reversed() ?: emptyList()
-                    items(ordered) { msg ->
+                    items(details?.messages ?: emptyList()) { msg ->
                         FormattedMessageBubble(msg, isUser = msg.role == "user")
                         Spacer(modifier = Modifier.height(4.dp))
                     }
