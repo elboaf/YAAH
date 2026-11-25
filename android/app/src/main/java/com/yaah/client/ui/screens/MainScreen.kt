@@ -13,9 +13,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.yaah.client.api.YaahClient
 import com.yaah.client.model.ConversationItem
+import com.yaah.client.model.HostInfo
 import com.yaah.client.util.Store
 import com.yaah.client.ui.YAAHTheme
 import kotlinx.coroutines.*
+import retrofit2.Response
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -123,9 +125,9 @@ fun HostPickerScreen(
 
         Button(
             onClick = {
-                if (manualHostState.value.isBlank()) return@Button
-                val host = if (manualHostState.value.contains(":")) manualHostState.value else "$manualHostState.value:8765"
-                connect(context, scope, host, manualPassphraseState.value, connectingState, errorState, onHostSelected)
+                val hostInput = manualHostState.value
+                if (hostInput.isBlank()) return@Button
+                connect(context, scope, hostInput, manualPassphraseState.value, connectingState, errorState, onHostSelected)
             },
             enabled = !connectingState.value
         ) {
@@ -152,26 +154,45 @@ private fun connect(
     onHostSelected: (HostEntry) -> Unit
 ) {
     connecting.value = true
+    // Default to the YAAH remote port when the host has none.
+    val hostWithPort = if (host.contains(":")) host else "$host:8765"
     scope.launch(Dispatchers.IO) {
-        val client = YaahClient("http://$host/", passphrase.ifBlank { null })
-        try {
-            val response = client.getService().getHostInfo()
-            if (response.isSuccessful) {
-                Store.save(context, host, passphrase)
-                withContext(Dispatchers.Main) {
-                    onHostSelected(HostEntry(host, "http://$host/", passphrase.ifBlank { null }))
-                }
-            } else {
-                withContext(Dispatchers.Main) {
-                    error.value = "Connection failed: ${response.code()}"
-                    connecting.value = false
-                }
-            }
-        } catch (e: Exception) {
+        // Retry transient failures (unstable WiFi, slow handshakes) a few
+        // times before giving up and showing the error state.
+        val response = retryConnect(hostWithPort, passphrase.ifBlank { null })
+        if (response != null) {
+            Store.save(context, host, passphrase)
             withContext(Dispatchers.Main) {
-                error.value = "Connection error: ${e.message}"
+                onHostSelected(HostEntry(host, "http://$hostWithPort/", passphrase.ifBlank { null }))
+            }
+        } else {
+            withContext(Dispatchers.Main) {
+                error.value = "Connection failed: can't reach $hostWithPort"
                 connecting.value = false
             }
         }
     }
+}
+
+/**
+ * Validate the connection by calling getHostInfo, retrying transient failures
+ * (unstable USB/WiFi link, slow handshakes) a few times with backoff before
+ * returning null so the caller can show the error state.
+ */
+private suspend fun retryConnect(
+    hostWithPort: String,
+    passphrase: String?
+): Response<HostInfo>? {
+    val client = YaahClient("http://$hostWithPort/", passphrase)
+    val service = client.getService()
+    repeat(4) { attempt ->
+        try {
+            val response = service.getHostInfo()
+            if (response.isSuccessful) return response
+        } catch (e: Exception) {
+            // transient failure; retry below with backoff
+        }
+        if (attempt < 3) delay(1500L * (attempt + 1))
+    }
+    return null
 }

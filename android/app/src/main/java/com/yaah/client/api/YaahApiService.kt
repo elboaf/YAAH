@@ -22,7 +22,10 @@ interface YaahApiService {
     @GET("api/remote/conversations/{conversationId}/snapshot")
     suspend fun getConversationSnapshot(
         @Path("conversationId") conversationId: String
-    ): Response<ConversationDetails>
+    ): Response<RemoteSnapshot>
+
+    @GET("api/models/available")
+    suspend fun getAvailableModels(): Response<AvailableModels>
 
     @POST("api/remote/conversations/{conversationId}/lease")
     suspend fun acquireLease(
@@ -41,10 +44,12 @@ interface YaahApiService {
     suspend fun cancelTurn(
         @Path("hostId") hostId: String,
         @Path("conversationId") conversationId: String
-    ): Response<Map<String, String>>
+    ): Response<CancelResponse>
 
+    // Authoritative running-turn state for a device: the conversation IDs
+    // mid-turn ([running]) and those parked on a pending ask_user ([pending]).
     @GET("api/remote/devices/{hostId}/running")
-    suspend fun getRunningAgents(
+    suspend fun runningAgents(
         @Path("hostId") hostId: String
-    ): Response<List<Map<String, Any>>>
+    ): Response<RunningAgents>
 }

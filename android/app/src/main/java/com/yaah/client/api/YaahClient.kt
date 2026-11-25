@@ -26,8 +26,12 @@ class YaahClient(baseUrl: String, private var passphrase: String?) {
                 }
                 chain.proceed(request.build())
             }
+            // `sendTurn` is a streaming NDJSON turn that runs on the owner
+            // machine; a model can take minutes to produce its first byte, so
+            // the read timeout must not fire mid-run. connectTimeout still
+            // bounds connection stalls; reads are left unbounded.
             .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS)
             .build()
 
         retrofit = Retrofit.Builder()
