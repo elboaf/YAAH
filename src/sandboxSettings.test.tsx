@@ -11,6 +11,11 @@ const { getConfig, updateConfig, getSandboxStatus } = vi.hoisted(() => ({
   getSandboxStatus: vi.fn(),
 }))
 
+// The card reads the platform the way the app does; tests stub the UA.
+// A Linux UA (no "Windows") exercises the non-Windows branch.
+const windowsAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+const linuxAgent = 'Mozilla/5.0 (X11; Linux x86_64)'
+
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
   return { ...actual, getConfig, updateConfig, getSandboxStatus }
@@ -24,6 +29,11 @@ describe('Windows Sandbox settings card (#112)', () => {
       sandbox: { enabled: true, memory_mb: 8192 },
     })
     updateConfig.mockResolvedValue({ ok: true })
+    // Reset platform to Windows so a non-Windows test can't leak forward.
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: windowsAgent,
+      configurable: true,
+    })
   })
 
   afterEach(() => {
@@ -36,6 +46,16 @@ describe('Windows Sandbox settings card (#112)', () => {
     render(<SandboxSettingsCard />)
     const box = await screen.findByRole('checkbox', { name: /Windows Sandbox/i })
     await waitFor(() => expect((box as HTMLInputElement).checked).toBe(true))
+  })
+
+  it('hides the whole section on non-Windows builds', () => {
+    Object.defineProperty(window.navigator, 'userAgent', {
+      value: linuxAgent,
+      configurable: true,
+    })
+    render(<SandboxSettingsCard />)
+    expect(screen.queryByText(/Windows Sandbox/i)).toBeNull()
+    expect(getSandboxStatus).not.toHaveBeenCalled()
   })
 
   it('shows the enable command and BIOS hint when the feature is missing', async () => {
