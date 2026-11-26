@@ -50,6 +50,12 @@ jobs:
       - name: Typecheck
         run: npx tsc --noEmit
 
+      # Frontend vitest suite (jsdom, per vite.config.ts) — gates component /
+      # transcript regressions that the type-check and build don't reach. Runs
+      # before the build: it's cheaper and failures are far easier to localize.
+      - name: Test (frontend)
+        run: npm run test:frontend
+
       - name: Build
         run: npm run build
 

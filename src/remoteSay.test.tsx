@@ -62,7 +62,7 @@ describe('remote composer captures say briefings (#226)', () => {
     render(
       <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
     )
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
 
     const input = screen.getByLabelText('Message this device chat')
     fireEvent.change(input, { target: { value: 'run the tests' } })

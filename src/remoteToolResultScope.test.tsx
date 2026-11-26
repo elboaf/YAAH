@@ -66,7 +66,7 @@ describe('streamed remote tool results scope media to the device (#401)', () => 
     render(
       <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
     )
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
 
     const input = screen.getByLabelText('Message this device chat')
     fireEvent.change(input, { target: { value: 'draw a gecko' } })
