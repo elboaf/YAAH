@@ -90,6 +90,7 @@ import {
   type WorkspaceRow,
   type RemoteConversation,
   type RemoteSnapshot,
+  type StoredMessage,
   getRemoteDeviceSnapshot,
   acquireRemoteDeviceLease,
   renewRemoteDeviceLease,
@@ -2495,6 +2496,28 @@ const wsBasename = (path: string) => {
 const expandKey = (path: string | null) =>
   `yaah.group.expanded.${path ?? 'default'}`
 
+// #855/#856: hydrate the remote checklist (todosByConv[key]) from the loaded
+// transcript. After a frontend restart the store is empty, but the transcript
+// carries the last accepted TodoWrite result in the tool_result row's `content`
+// (a parsed object with a `todos` array) — mirror the live-update path so the
+// remote card renders the checklist the same way the local path does.
+function hydrateRemoteTodos(rows: StoredMessage[] | null, key: string): void {
+  if (!rows) return
+  for (const row of rows) {
+    if (row.role !== 'tool') continue
+    const content = row.content
+    if (!content || typeof content !== 'string') continue
+    try {
+      const parsed = JSON.parse(content) as { todos?: TodoItem[] }
+      if (Array.isArray(parsed?.todos)) {
+        useAgent.getState().setTodos(key, parsed.todos)
+      }
+    } catch {
+      // not a JSON result — leave it, the live TodoWrite path repopulates
+    }
+  }
+}
+
 export function RemoteTranscriptDialog({
   hostId,
   conversationId,
@@ -2531,7 +2554,15 @@ export function RemoteTranscriptDialog({
     setError(null)
     getRemoteDeviceMessages(hostId, conversationId)
       .then((rows) => {
-        if (!cancelled) setTranscript(hostId, conversationId, buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
+        if (!cancelled) {
+          setTranscript(hostId, conversationId, buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
+          // #855/#856: after a frontend restart todosByConv[remoteKey] is
+          // empty, but the transcript carries the last accepted TodoWrite
+          // result. Hydrate the checklist from that result so the remote card
+          // renders the checklist the same way the local path does (which
+          // seeds from the conversation row's session_todos).
+          hydrateRemoteTodos(rows, remoteKey)
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(errorMessage(e))
@@ -2844,7 +2875,10 @@ export function RemoteTranscriptDialog({
           // goal banner only when it carries something beyond that row, so the root
           // prompt isn't duplicated (banner + bubble). The first row stays intact,
           // so any images/media it carries still render.
-          {remoteObjective && remoteObjective !== (renderedMessages.find((m) => m.role === 'user')?.content ?? '') && (
+          // #856: a nonempty remote checklist still shows the card even when the
+          // objective matches the first user message (the suppression above only
+          // applies when there is no checklist to display).
+          {((remoteTodos && remoteTodos.length > 0) || (remoteObjective && remoteObjective !== (renderedMessages.find((m) => m.role === 'user')?.content ?? ''))) && (
             <ObjectiveCard objective={remoteObjective} iteration={goalIterationCount(renderedMessages ?? [])} todos={remoteTodos} />
           )}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}

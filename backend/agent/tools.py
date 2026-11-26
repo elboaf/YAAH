@@ -1711,9 +1711,14 @@ async def _todo_write_executor(
                 touch_updated_at=False,
                 session_todos=json.dumps(items),
             )
-        except Exception as e:  # noqa: BLE001 — the checklist is an anchor,
-            # not a gate; a write failure must not wedge the turn
+        except Exception as e:  # #855/#856: the checklist is an anchor, not a
+            # gate — a write failure must not wedge the turn — but it must also
+            # not report a durable update that never happened. Return an error
+            # WITHOUT the accepted todos payload so the frontend does not show a
+            # list that the next TodoRead or restart will silently drop; the
+            # turn continues.
             logging.warning("session_todos_write_failed: %s", e)
+            return {"error": "Could not save the goal checklist. It will not persist until this can be retried."}
     return {
         "todos": items,
         "summary": {
@@ -3834,6 +3839,14 @@ async def execute_tool(
         # #303: one injection point for chat-scoped tools — the model can't
         # pass its own conversation id, and every dispatch path (direct,
         # gate-approved re-exec, sub-agent) funnels through execute_tool.
+        arguments = {**arguments, "conversation_id": conversation_id}
+    if name in ("TodoWrite", "TodoRead"):
+        # #855: the checklist is conversation-scoped state (the conversation
+        # row's `session_todos`). execute_tool's `conversation_id` parameter
+        # is only forwarded into `arguments` for CONTEXT_TOOLS above, so on
+        # the real dispatch path TodoWrite/TodoRead would otherwise receive
+        # conversation_id=None and skip the write. Forward it here, like the
+        # CONTEXT_TOOLS block, so every dispatch path reaches the executor.
         arguments = {**arguments, "conversation_id": conversation_id}
     if name in _MEMORY_TOOL_NAMES:
         # #346: one injection point for the canonical memory key — the

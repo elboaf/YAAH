@@ -196,3 +196,46 @@ async def test_todo_read_executor_empty_yields_empty_list():
         workspace=".", conversation_id=cid
     )
     assert result["todos"] == []
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_forwards_conversation_id_to_todo_executors():
+    # #856 (CodeRabbit Major): TodoWrite/TodoRead are not CONTEXT_TOOLS, so
+    # execute_tool must still forward conversation_id into the executor's
+    # arguments on the real dispatch path. Without that the write is skipped
+    # (executor receives conversation_id=None) and the checklist never
+    # persists. Drive execute_tool with conversation_id and confirm the row
+    # is written.
+    cid = await database.create_conversation("Todo execute_tool forwarding")
+    items = [{"content": "Fix A", "status": "pending", "priority": "high"}]
+    result = await tools_mod.execute_tool(
+        todo.TODO_WRITE_TOOL, {"todos": items}, workspace=".", conversation_id=cid
+    )
+    assert result["todos"] == items
+    row = await database.get_conversation(cid)
+    assert json.loads(row["session_todos"]) == items
+
+
+@pytest.mark.asyncio
+async def test_todo_write_executor_write_failure_returns_error():
+    # #856 (CodeRabbit Minor): a database write failure must report an error
+    # WITHOUT the accepted todos payload, so the frontend does not show a list
+    # the next TodoRead/restart will silently drop. The turn still continues.
+    cid = await database.create_conversation("Todo write failure")
+    items = [{"content": "Fix A", "status": "pending", "priority": "high"}]
+
+    real_update = database.update_conversation
+
+    async def failing_update(*a, **k):
+        raise RuntimeError("db down")
+
+    database.update_conversation = failing_update
+    try:
+        result = await tools_mod.EXECUTORS[todo.TODO_WRITE_TOOL](
+            workspace=".", conversation_id=cid, todos=items
+        )
+    finally:
+        database.update_conversation = real_update
+
+    assert "error" in result
+    assert "todos" not in result
