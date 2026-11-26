@@ -9065,9 +9065,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
 
             {activeTab === 'advanced' && (
               <>
-                <SettingsCard title="Windows Sandbox" className="col-span-2">
-                  <SandboxSettingsCard />
-                </SettingsCard>
+                {!isWindowsPlatform() ? null : (
+                  <SettingsCard title="Windows Sandbox" className="col-span-2">
+                    <SandboxSettingsCard />
+                  </SettingsCard>
+                )}
 
                 <SettingsCard title="Memory" className="col-span-2">
                   <MemoryToggle />

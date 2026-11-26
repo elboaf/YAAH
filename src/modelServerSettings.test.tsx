@@ -130,7 +130,7 @@ describe('Model server settings card (#730)', () => {
       configurable: true,
     })
     render(<RerankerServerSettingsCard />)
-    expect(screen.queryByText(/Local model/i)).toBeNull()
+    expect(screen.queryByText(/Reranker server/i)).toBeNull()
     expect(getModelServerStatus).not.toHaveBeenCalled()
   })
 
