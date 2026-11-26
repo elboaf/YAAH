@@ -15,6 +15,7 @@ import signal
 import subprocess
 from pathlib import Path
 
+from backend.agent import todo as todo_mod
 from backend.agent.shell import resolve_git_bash
 
 
@@ -1681,7 +1682,75 @@ def _memory_executor(op: str):
     return _run
 
 
-# ---------------------------------------------------------------- image gen
+# ---------------------------------------------------------------- #855 todo
+# The multi-goal checklist (ycode "TodoWrite"). TodoWrite persists the full
+# list to the conversation row's `session_todos` column (the loop re-injects
+# it as a tail message every turn, like session_goal); TodoRead returns the
+# current list. Both are gated on conversation_id (the loop injects it, like
+# CONTEXT_TOOLS) — a direct local caller without one still works but the list
+# is not persisted anywhere durable.
+async def _todo_write_executor(
+    workspace: str, conversation_id: int | None = None, **arguments
+) -> dict:
+    from backend.agent import todo as todo_mod
+    from backend.db import database
+
+    items = todo_mod.parse_todo_result(arguments)
+    if items is None:
+        return {
+            "error": (
+                "TodoWrite requires a non-empty 'todos' array of "
+                "{content, status, priority} items."
+            )
+        }
+    if conversation_id is not None:
+        try:
+            import json
+            await database.update_conversation(
+                conversation_id,
+                touch_updated_at=False,
+                session_todos=json.dumps(items),
+            )
+        except Exception as e:  # noqa: BLE001 — the checklist is an anchor,
+            # not a gate; a write failure must not wedge the turn
+            logging.warning("session_todos_write_failed: %s", e)
+    return {
+        "todos": items,
+        "summary": {
+            "total": len(items),
+            "pending": sum(1 for t in items if t["status"] == todo_mod.PENDING),
+            "in_progress": sum(
+                1 for t in items if t["status"] == todo_mod.IN_PROGRESS
+            ),
+            "completed": sum(
+                1 for t in items if t["status"] == todo_mod.COMPLETED
+            ),
+        },
+    }
+
+
+async def _todo_read_executor(
+    workspace: str, conversation_id: int | None = None, **arguments
+) -> dict:
+    from backend.db import database
+
+    items: list[dict] = []
+    if conversation_id is not None:
+        try:
+            row = await database.get_conversation(conversation_id)
+            raw = (row or {}).get("session_todos")
+            if raw:
+                import json
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    items = [
+                        todo_mod._normalize_item(t)
+                        for t in parsed
+                        if todo_mod._normalize_item(t) is not None
+                    ]
+        except Exception as e:  # noqa: BLE001
+            logging.warning("session_todos_read_failed: %s", e)
+    return {"todos": items}
 # Text-to-image via a stable-diffusion.cpp server (sd-server, default
 # http://127.0.0.1:1234). Two tools: generate_image (txt2img) and
 # upscale_image (native ESRGAN endpoint over an existing image).
@@ -3554,6 +3623,9 @@ EXECUTORS = {
     "memory_read": _memory_executor("read"),
     "memory_search": _memory_executor("search"),
     "memory_delete": _memory_executor("delete"),
+    # #855: the multi-goal checklist (ycode TodoWrite / TodoRead).
+    todo_mod.TODO_WRITE_TOOL: _todo_write_executor,
+    todo_mod.TODO_READ_TOOL: _todo_read_executor,
 }
 
 # Issue #770: spawn_detached / stop_process. The spawn flags (CREATE_NO_WINDOW
@@ -3564,7 +3636,13 @@ EXECUTORS = {
 # must have an executor, so the registration cannot stay Windows-gated. On a
 # remote host the executor still runs the detached spawn on the owner machine.
 from backend.agent import detached as detached_mod
+from backend.agent import todo as todo_mod
 EXECUTORS.update(detached_mod.EXECUTORS)
+
+# #855: the multi-goal checklist (ycode TodoWrite / TodoRead). Added to
+# TOOLS_SCHEMA so get_schemas() offers them; the executors are registered
+# above. Not Windows/remote gated — pure in-process state.
+TOOLS_SCHEMA += [todo_mod.TODO_WRITE_SCHEMA, todo_mod.TODO_READ_SCHEMA]
 
 # Windows Sandbox tools (disposable test VMs + persistent dev toolkit,
 # see backend/agent/sandbox.py): Windows-only for the same reason, and
@@ -3603,6 +3681,8 @@ _READ_TOOLS = {
     "spawn_agent",
     # conversation history is a read-only transcript query
     "search_conversation_history",
+    # #855: reads the conversation's durable todo list — observation only
+    "TodoRead",
     # memory reads live outside the workspace but change nothing
     "memory_read", "memory_search",
 }
@@ -3620,6 +3700,9 @@ _MUTATING_TOOLS = {
     # moves the workspace's checked-out branch (checkout + possible ref
     # creation) - a repo mutation, gated like a file write
     "branch_select",
+    # #855: writes the conversation's durable todo list (the goal
+    # checklist) — a state mutation, gated like a file write
+    "TodoWrite",
 }
 _SHELL_TOOLS = {
     "bash", "powershell",

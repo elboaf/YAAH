@@ -438,6 +438,15 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute(
             "ALTER TABLE conversations ADD COLUMN session_goal TEXT"
         )
+    if "session_todos" not in conv_cols:
+        # #855: the conversation's durable todo list (the ycode multi-goal
+        # checklist). JSON of {content,status,priority} items, re-injected as a
+        # tail message every turn so the checklist survives a session restart
+        # and the goal card can cross items off. Written only by the agent loop
+        # via TodoWrite; NULL/empty = feature inactive.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN session_todos TEXT"
+        )
     if "persisted_skill_tail" not in conv_cols:
         # Persisted load_skill tail: the byte-exact "# Loaded skill" tail
         # message a static-mode conversation accumulated through the
@@ -1088,6 +1097,7 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
         "persisted_skill_tail",
         "persisted_skill_tail_ws",
         "session_goal",
+        "session_todos",
         "model",
         "effort",
         "subagent_model",
@@ -1103,6 +1113,10 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
     # hold at the write boundary regardless of caller).
     if "session_goal" in updates and not updates["session_goal"].strip():
         updates["session_goal"] = None
+    # #855: an empty todo list is the same as "no checklist" — normalise to
+    # NULL so the column can never hold a meaningless empty string.
+    if "session_todos" in updates and not updates["session_todos"].strip():
+        updates["session_todos"] = None
     if not updates:
         return False
     if updates.get("model"):

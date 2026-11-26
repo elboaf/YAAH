@@ -1663,6 +1663,11 @@ async def _execute_with_progress(
         # injection itself lives in execute_tool (#303) so every path
         # (direct, gate re-exec, sub-agents) gets it — this kwarg feeds it.
         tool_kwargs["conversation_id"] = conversation_id
+    if name in ("TodoWrite", "TodoRead"):
+        # #855: the goal checklist is conversation-scoped state (the
+        # conversation row's `session_todos`). Inject the id the same way
+        # CONTEXT_TOOLS get it, so TodoWrite persists to the right chat.
+        tool_kwargs["conversation_id"] = conversation_id
     if name in MEMORY_TOOLS:
         # #346: the canonical workspace root this turn resolved for
         # memory (see memory_workspace in _run_agent_claimed). The
@@ -2171,6 +2176,25 @@ async def _run_agent_claimed(
     except Exception:  # noqa: BLE001 — the objective is an anchor, not a gate
         log.warning("session_goal_write_failed")
 
+    # #855: the durable todo list (the multi-goal checklist). Read the
+    # conversation row's `session_todos` so the checklist survives a session
+    # restart and is re-injected every turn (todo.tail_message, below). The
+    # loop never rewrites it here — TodoWrite owns that write — so this is a
+    # read for injection only. Best-effort: a failed read must not break the turn.
+    session_todos: list[dict] = []
+    try:
+        _conv = await get_conversation(conversation_id)
+        _raw = (_conv or {}).get("session_todos")
+        if _raw:
+            _parsed = json.loads(_raw)
+            if isinstance(_parsed, list):
+                from backend.agent import todo as todo_mod
+                session_todos = [
+                    t for t in _parsed if todo_mod._normalize_item(t) is not None
+                ]
+    except Exception:  # noqa: BLE001 — the checklist is an anchor, not a gate
+        log.warning("session_todos_read_failed")
+
     # Per-conversation system prompt override (Q17) wins over the global
     # one.
     conv = await get_conversation(conversation_id)
@@ -2372,6 +2396,16 @@ async def _run_agent_claimed(
         _objective_tail = goal_mod.objective_tail_message(session_goal)
         if _objective_tail:
             messages.append(_objective_tail)
+    # #855: the durable todo list (the multi-goal checklist) rides as a tail
+    # message after history, mirroring the objective tail. It is re-injected
+    # every turn so the agent sees its own checklist and can update it with
+    # TodoWrite. Kept out of the frozen head (see todo.tail_message) so prefix
+    # caching stays byte-stable; an empty checklist costs no tail re-prefill.
+    if completion_verifier_enabled and include_history:
+        from backend.agent import todo as todo_mod
+        _todo_tail = todo_mod.todo_state_message(session_todos)
+        if _todo_tail:
+            messages.append(_todo_tail)
     # Static mode, freeze turn: persist the head exactly as this turn's
     # model call sends it, alongside the workspace it was built under, awaited
     # inline so a race with the NEXT turn's read is impossible (a detached
@@ -3661,6 +3695,8 @@ async def _run_agent_claimed(
                 yield _ndjson({"type": "queued_autosend", "items": remaining})
     finally:
         if not file_summary_emitted:
+            # If the stream was disconnected/closed, there may be nobody left
+            # to receive an event; persistence makes the summary available on
             # If the stream was disconnected/closed, there may be nobody left
             # to receive an event; persistence makes the summary available on
             # the next history load without yielding from async-generator

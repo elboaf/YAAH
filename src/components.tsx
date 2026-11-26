@@ -128,7 +128,7 @@ import {
 import { isWindowsPlatform } from './update'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
-import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, goalIterationCount, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentStatus } from './store'
+import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, goalIterationCount, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentStatus, type TodoItem } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -1421,10 +1421,12 @@ function ExpandableAttachmentChip({
  *  the shared `lg-card` shell so it reads as part of the same ledger band; the
  *  objective text and iteration count are read from the store so the card is
  *  identical on the local and thin-client transcript paths. */
-export function ObjectiveCard({ objective, iteration }: {
+export function ObjectiveCard({ objective, iteration, todos }: {
   objective: string
   iteration: number
+  todos?: TodoItem[]
 }) {
+  const completedCount = todos?.filter((t) => t.status === 'completed').length ?? 0
   return (
     <div className="lg-card mb-2" role="status">
       <div className="lg-head">
@@ -1433,8 +1435,31 @@ export function ObjectiveCard({ objective, iteration }: {
         {iteration > 1 && (
           <span className="lg-sub text-sky-300/90">iteration {iteration}</span>
         )}
+        {todos && todos.length > 0 && (
+          <span className="lg-sub text-zinc-400">{completedCount}/{todos.length} done</span>
+        )}
       </div>
-      <div className="px-1 pb-2 pt-1 text-xs leading-snug text-zinc-200">{objective}</div>
+      <div className="px-1 pb-1 pt-1 text-xs leading-snug text-zinc-200">{objective}</div>
+      {todos && todos.length > 0 && (
+        <ul className="px-1 pb-2 pt-1 space-y-0.5">
+          {todos.map((t, i) => (
+            <li key={i} className="flex items-start gap-2 text-[11px] leading-snug">
+              <span className="mt-0.5 shrink-0" aria-hidden="true">
+                {t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '→' : '·'}
+              </span>
+              <span className={
+                t.status === 'completed'
+                  ? 'text-zinc-500 line-through'
+                  : t.status === 'in_progress'
+                    ? 'text-sky-300/90'
+                    : 'text-zinc-300'
+              }>
+                {t.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -2594,6 +2619,11 @@ export function RemoteTranscriptDialog({
   // appends the streamed transcript into this viewer's buffer. The remote
   // key keeps it collision-safe against same-ID local chats.
   const remoteKey = remoteConversationKey(hostId, conversationId)
+  // #855: the durable multi-goal checklist for this viewer's buffer, so the
+  // remote card shows the checklist the same way the local card does.
+  const remoteTodos = useAgent(
+    (s) => s.todosByConv[remoteKey],
+  )
   const remoteStatus = useAgent((s) => s.statusByConv[remoteKey] ?? 'idle')
   // #308 follow-up: the remote ask_user card renders only while this chat is
   // the one asking (a hidden remote turn's question must not leak here).
@@ -2722,6 +2752,14 @@ export function RemoteTranscriptDialog({
             ? scopeRemoteMedia(ev.result as Record<string, unknown>, hostId)
             : ev.result
         useAgent.getState().finishToolCall(remoteKey, asstId, ev.call_id ?? '', remoteResult)
+        // #855: TodoWrite carries the updated checklist in its result. Keep
+        // the store's todosByConv in sync on the thin-client viewer too.
+        if (ev.name === 'TodoWrite' && remoteResult && typeof remoteResult === 'object') {
+          const todos = (remoteResult as { todos?: TodoItem[] }).todos
+          if (Array.isArray(todos)) {
+            useAgent.getState().setTodos(remoteKey, todos)
+          }
+        }
         if (ev.name === 'ask_user') {
           useAgent.getState().setPendingQuestion((q) => (q && q.convKey === remoteKey && q.callId === (ev.call_id ?? '') ? null : q))
         }
@@ -2807,7 +2845,7 @@ export function RemoteTranscriptDialog({
           // prompt isn't duplicated (banner + bubble). The first row stays intact,
           // so any images/media it carries still render.
           {remoteObjective && remoteObjective !== (renderedMessages.find((m) => m.role === 'user')?.content ?? '') && (
-            <ObjectiveCard objective={remoteObjective} iteration={goalIterationCount(renderedMessages ?? [])} />
+            <ObjectiveCard objective={remoteObjective} iteration={goalIterationCount(renderedMessages ?? [])} todos={remoteTodos} />
           )}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
         </div>
@@ -10174,6 +10212,19 @@ export function ChatScopePickers() {
           // row's session_goal (authoritative — survives resume/restart). An
           // explicit setObjective wins over the first-user-message fallback.
           useAgent.getState().setObjective(String(conversationId), c.session_goal || '')
+          // #855: seed the durable multi-goal checklist from the conversation
+          // row's session_todos (authoritative — survives resume/restart).
+          const rawTodos = c.session_todos
+          if (rawTodos) {
+            try {
+              const parsed = JSON.parse(rawTodos) as TodoItem[]
+              if (Array.isArray(parsed)) {
+                useAgent.getState().setTodos(String(conversationId), parsed)
+              }
+            } catch {
+              // malformed — leave it empty, TodoWrite will repopulate
+            }
+          }
         }
       })
       .catch(() => {})
@@ -10624,6 +10675,11 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   const objectiveText = useAgent(
     (s) => s.objectiveByConv[s.conversationId === null ? 'draft' : String(s.conversationId)],
   )
+  // #855: the durable multi-goal checklist, reactive so the card updates as
+  // TodoWrite tool_result events arrive.
+  const todos = useAgent(
+    (s) => s.todosByConv[s.conversationId === null ? 'draft' : String(s.conversationId)],
+  )
   const error = useError()
   const pendingQuestion = useAgent((s) => {
     const key = s.bufferKey()
@@ -11037,7 +11093,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           </div>
         )}
         {objectiveText && (
-          <ObjectiveCard objective={objectiveText} iteration={goalIterationCount(messages)} />
+          <ObjectiveCard objective={objectiveText} iteration={goalIterationCount(messages)} todos={todos} />
         )}
         {messages.map((m) => (
           <MessageView key={m.id} msg={m} live={m.id === liveId} />
@@ -12060,6 +12116,14 @@ export function Composer({
       }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
+      }
+      // #855: TodoWrite carries the updated checklist in its result. Keep the
+      // store's todosByConv in sync so the goal card reflects it live.
+      if (ev.name === 'TodoWrite' && ev.result && typeof ev.result === 'object') {
+        const todos = (ev.result as { todos?: TodoItem[] }).todos
+        if (Array.isArray(todos)) {
+          useAgent.getState().setTodos(bufKey, todos)
+        }
       }
       if (ev.name === 'exit_plan') {
         setPendingPlanApproval((p) => (p && p.callId === ev.call_id ? null : p))

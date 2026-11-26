@@ -6,6 +6,14 @@ let toastSeq = 0
 
 export type Role = 'user' | 'assistant' | 'tool' | 'system'
 
+/** #855: one sub-goal of the durable checklist (the ycode multi-goal card).
+ *  Mirrors the backend's TodoWrite item shape. */
+export interface TodoItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  priority: 'high' | 'medium' | 'low'
+}
+
 export interface ToolCall {
   id: string
   name: string
@@ -332,6 +340,12 @@ interface AgentState {
    *  metadata arrives). Drives the top-of-chat objective card. */
   objectiveByConv: Record<string, string>
   setObjective: (key: string, objective: string) => void
+  /** #855: the durable multi-goal checklist per conversation, keyed by
+   *  conversation id. Seeded from the conversation row's `session_todos`
+   *  (authoritative — survives resume/restart) and updated live by
+   *  TodoWrite tool_result events. Drives the goal card's checklist. */
+  todosByConv: Record<string, TodoItem[]>
+  setTodos: (key: string, todos: TodoItem[]) => void
 
   /**
    * Per-conversation telemetry tape: one ever-growing line that every tool
@@ -745,6 +759,9 @@ export const useAgent = create<AgentState>((set, get) => ({
   objectiveByConv: {},
   setObjective: (key, objective) =>
     set((s) => ({ objectiveByConv: { ...s.objectiveByConv, [key]: objective } })),
+  todosByConv: {},
+  setTodos: (key, todos) =>
+    set((s) => ({ todosByConv: { ...s.todosByConv, [key]: todos } })),
 
   tapeByConv: {},
   appendTape: (key, chunk) =>
