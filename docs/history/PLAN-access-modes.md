@@ -71,6 +71,27 @@ Frontend: the `tool_start`/`tool_result` events for `exit_plan` drive a sky-bord
 
 Plus: the whole backend suite runs with `access_mode: "full"` pinned in conftest (loop tests have no user to answer prompts); `npx tsc --noEmit` and `npm run build` clean.
 
+## Follow-up: zombie claim at the gate (#811, PR #833)
+
+Turns parked at the ask_user/approval gate whose client stream died (disconnect,
+proxy timeout, frontend reload mid-gate) survived as zombies: the run claim was
+held forever and the chat wedged. Root cause was `_wait_answer` catching
+`CancelledError` and re-raising it unconditionally, so its callers
+(`_ask_user`, `_exit_plan`, `_await_approval`) treated stream teardown the same
+as a user stop and never let the generator end / `run_agent`'s `finally` release
+the claim. Fix distinguishes the two paths: when `cancel_ev` is NOT set (stream
+teardown) re-raise `CancelledError` so the generator terminates and releases the
+claim; when `cancel_ev` IS set (user stop) keep today's behavior. Covered by
+`test_gate_stream_teardown_releases_claim` in `backend/tests/test_access_modes.py`.
+
+PR #833 also carried a bundled, unrelated fix to `backend/agent/memory.py`
+(`index_for_prompt` now sizes its trim decision on the full rendered block — body +
+wrapper + truncation marker — instead of the body alone, so the index can't run
+past `MAX_INDEX_CHARS` once the wrapper is included, tied to #818). CR flagged it
+as out of scope for #811, so it was split out into its own PR, #853
+(`feat/memory-index-rendered-length`), which links #818 and adds a test asserting
+the rendered index stays within `MAX_INDEX_CHARS`.
+
 ## Out of scope (this iteration)
 
 - Per-conversation modes, per-tool/per-server allowlists ("always allow bash"), session-scoped "don't ask again".
