@@ -154,6 +154,10 @@ export interface ConversationRow {
    *  persisted per turn and re-injected into every turn's context. NULL/empty
    *  = no active objective. Surfaced as the top-of-chat objective card. */
   session_goal?: string | null
+  /** #855: the durable multi-goal checklist (JSON of TodoItem[]), persisted
+   *  by TodoWrite and re-injected into every turn's context. NULL/empty = no
+   *  active checklist. Surfaced as the goal card's checklist. */
+  session_todos?: string | null
 }
 
 export interface ContextInfo {

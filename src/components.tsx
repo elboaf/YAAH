@@ -90,6 +90,7 @@ import {
   type WorkspaceRow,
   type RemoteConversation,
   type RemoteSnapshot,
+  type StoredMessage,
   getRemoteDeviceSnapshot,
   acquireRemoteDeviceLease,
   renewRemoteDeviceLease,
@@ -128,7 +129,7 @@ import {
 import { isWindowsPlatform } from './update'
 import { createDeltaBuffer } from './deltaBuffer'
 import { normalizeAskOptions } from './askOptions'
-import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, goalIterationCount, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentStatus } from './store'
+import { buildMessages, convWorkspaceCache, lastAssistantId, resolveSendTarget, resolveSendTargetAsync, tapeQuestionAction, selectMessages, goalIterationCount, useAgent, useError, useStatus, type AccessMode, type ChatMessage, type Toast, type PendingApproval, type PendingPlanApproval, type PendingQuestion, type ToolCall, type SubAgentRun, type AgentStatus, type TodoItem } from './store'
 import { useUpdateCheck } from './update'
 import { remoteConversationKey, useRemoteConversations } from './remoteConversationStore'
 import { useTts, splitSentences, liveProse, spokenLine, setKokoroShaping } from './speech'
@@ -1421,10 +1422,12 @@ function ExpandableAttachmentChip({
  *  the shared `lg-card` shell so it reads as part of the same ledger band; the
  *  objective text and iteration count are read from the store so the card is
  *  identical on the local and thin-client transcript paths. */
-export function ObjectiveCard({ objective, iteration }: {
+export function ObjectiveCard({ objective, iteration, todos }: {
   objective: string
   iteration: number
+  todos?: TodoItem[]
 }) {
+  const completedCount = todos?.filter((t) => t.status === 'completed').length ?? 0
   return (
     <div className="lg-card mb-2" role="status">
       <div className="lg-head">
@@ -1433,8 +1436,31 @@ export function ObjectiveCard({ objective, iteration }: {
         {iteration > 1 && (
           <span className="lg-sub text-sky-300/90">iteration {iteration}</span>
         )}
+        {todos && todos.length > 0 && (
+          <span className="lg-sub text-zinc-400">{completedCount}/{todos.length} done</span>
+        )}
       </div>
-      <div className="px-1 pb-2 pt-1 text-xs leading-snug text-zinc-200">{objective}</div>
+      <div className="px-1 pb-1 pt-1 text-xs leading-snug text-zinc-200">{objective}</div>
+      {todos && todos.length > 0 && (
+        <ul className="px-1 pb-2 pt-1 space-y-0.5">
+          {todos.map((t, i) => (
+            <li key={i} className="flex items-start gap-2 text-[11px] leading-snug">
+              <span className="mt-0.5 shrink-0" aria-hidden="true">
+                {t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '→' : '·'}
+              </span>
+              <span className={
+                t.status === 'completed'
+                  ? 'text-zinc-500 line-through'
+                  : t.status === 'in_progress'
+                    ? 'text-sky-300/90'
+                    : 'text-zinc-300'
+              }>
+                {t.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }
@@ -2470,6 +2496,48 @@ const wsBasename = (path: string) => {
 const expandKey = (path: string | null) =>
   `yaah.group.expanded.${path ?? 'default'}`
 
+// #855/#856: hydrate the remote checklist (todosByConv[key]) from the loaded
+// transcript. After a frontend restart the store is empty, but the transcript
+// carries the last accepted TodoWrite result in the tool_result row's `content`
+// (a parsed object with a `todos` array) — mirror the live-update path so the
+// remote card renders the checklist the same way the local path does.
+//
+// #856 follow-up: apply only results matched to accepted TodoWrite calls. A
+// TodoRead fallback result ({"todos": []}) is also a tool result with a
+// `todos` array and must NOT overwrite the live checklist; an explicit
+// TodoWrite([]) clear is preserved because it is still a TodoWrite result.
+//
+// #856 follow-up (revision guard): only apply the hydrated list when no live
+// TodoWrite was accepted after the request began. Capture the conversation's
+// checklist revision before issuing the request; when the response arrives,
+// apply the hydrated list only if the revision is unchanged, so a late
+// transcript cannot clobber a newer live update. After a restart the store is
+// empty and no live update has occurred, so the revision is unchanged and the
+// hydrate still applies.
+function hydrateRemoteTodos(
+  rows: StoredMessage[] | null,
+  key: string,
+  snapshotRevision: number,
+): void {
+  if (!rows) return
+  if ((useAgent.getState().checklistRevisionByConv[key] ?? 0) !== snapshotRevision) return
+  for (const row of rows) {
+    if (row.role !== 'tool') continue
+    const name = row.tool_calls?.[0]?.function?.name
+    if (name !== 'TodoWrite') continue
+    const content = row.content
+    if (!content || typeof content !== 'string') continue
+    try {
+      const parsed = JSON.parse(content) as { todos?: TodoItem[] }
+      if (Array.isArray(parsed?.todos)) {
+        useAgent.getState().setTodos(key, parsed.todos)
+      }
+    } catch {
+      // not a JSON result — leave it, the live TodoWrite path repopulates
+    }
+  }
+}
+
 export function RemoteTranscriptDialog({
   hostId,
   conversationId,
@@ -2504,9 +2572,21 @@ export function RemoteTranscriptDialog({
     let cancelled = false
     setLoading(true)
     setError(null)
+    // Capture the conversation's checklist revision BEFORE issuing the
+    // request so we can reject a late transcript response that would clobber
+    // a newer live TodoWrite accepted while this request was pending.
+    const snapshotRevision = useAgent.getState().checklistRevisionByConv[remoteKey] ?? 0
     getRemoteDeviceMessages(hostId, conversationId)
       .then((rows) => {
-        if (!cancelled) setTranscript(hostId, conversationId, buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
+        if (!cancelled) {
+          setTranscript(hostId, conversationId, buildMessages(rows).map((message) => scopeRemoteMedia(message, hostId)))
+          // #855/#856: after a frontend restart todosByConv[remoteKey] is
+          // empty, but the transcript carries the last accepted TodoWrite
+          // result. Hydrate the checklist from that result so the remote card
+          // renders the checklist the same way the local path does (which
+          // seeds from the conversation row's session_todos).
+          hydrateRemoteTodos(rows, remoteKey, snapshotRevision)
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(errorMessage(e))
@@ -2594,6 +2674,11 @@ export function RemoteTranscriptDialog({
   // appends the streamed transcript into this viewer's buffer. The remote
   // key keeps it collision-safe against same-ID local chats.
   const remoteKey = remoteConversationKey(hostId, conversationId)
+  // #855: the durable multi-goal checklist for this viewer's buffer, so the
+  // remote card shows the checklist the same way the local card does.
+  const remoteTodos = useAgent(
+    (s) => s.todosByConv[remoteKey],
+  )
   const remoteStatus = useAgent((s) => s.statusByConv[remoteKey] ?? 'idle')
   // #308 follow-up: the remote ask_user card renders only while this chat is
   // the one asking (a hidden remote turn's question must not leak here).
@@ -2722,6 +2807,18 @@ export function RemoteTranscriptDialog({
             ? scopeRemoteMedia(ev.result as Record<string, unknown>, hostId)
             : ev.result
         useAgent.getState().finishToolCall(remoteKey, asstId, ev.call_id ?? '', remoteResult)
+        // #855: TodoWrite carries the updated checklist in its result. Keep
+        // the store's todosByConv in sync on the thin-client viewer too.
+        if (ev.name === 'TodoWrite' && remoteResult && typeof remoteResult === 'object') {
+          const todos = (remoteResult as { todos?: TodoItem[] }).todos
+          if (Array.isArray(todos)) {
+            useAgent.getState().setTodos(remoteKey, todos)
+            // #856 follow-up: bump the checklist revision so a late transcript
+            // response (from a request that was pending when this write landed)
+            // is rejected by the revision guard in hydrateRemoteTodos.
+            useAgent.getState().bumpChecklistRevision(remoteKey)
+          }
+        }
         if (ev.name === 'ask_user') {
           useAgent.getState().setPendingQuestion((q) => (q && q.convKey === remoteKey && q.callId === (ev.call_id ?? '') ? null : q))
         }
@@ -2806,8 +2903,11 @@ export function RemoteTranscriptDialog({
           // goal banner only when it carries something beyond that row, so the root
           // prompt isn't duplicated (banner + bubble). The first row stays intact,
           // so any images/media it carries still render.
-          {remoteObjective && remoteObjective !== (renderedMessages.find((m) => m.role === 'user')?.content ?? '') && (
-            <ObjectiveCard objective={remoteObjective} iteration={goalIterationCount(renderedMessages ?? [])} />
+          // #856: a nonempty remote checklist still shows the card even when the
+          // objective matches the first user message (the suppression above only
+          // applies when there is no checklist to display).
+          {((remoteTodos && remoteTodos.length > 0) || (remoteObjective && remoteObjective !== (renderedMessages.find((m) => m.role === 'user')?.content ?? ''))) && (
+            <ObjectiveCard objective={remoteObjective} iteration={goalIterationCount(renderedMessages ?? [])} todos={remoteTodos} />
           )}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
         </div>
@@ -10174,6 +10274,19 @@ export function ChatScopePickers() {
           // row's session_goal (authoritative — survives resume/restart). An
           // explicit setObjective wins over the first-user-message fallback.
           useAgent.getState().setObjective(String(conversationId), c.session_goal || '')
+          // #855: seed the durable multi-goal checklist from the conversation
+          // row's session_todos (authoritative — survives resume/restart).
+          const rawTodos = c.session_todos
+          if (rawTodos) {
+            try {
+              const parsed = JSON.parse(rawTodos) as TodoItem[]
+              if (Array.isArray(parsed)) {
+                useAgent.getState().setTodos(String(conversationId), parsed)
+              }
+            } catch {
+              // malformed — leave it empty, TodoWrite will repopulate
+            }
+          }
         }
       })
       .catch(() => {})
@@ -10624,6 +10737,11 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   const objectiveText = useAgent(
     (s) => s.objectiveByConv[s.conversationId === null ? 'draft' : String(s.conversationId)],
   )
+  // #855: the durable multi-goal checklist, reactive so the card updates as
+  // TodoWrite tool_result events arrive.
+  const todos = useAgent(
+    (s) => s.todosByConv[s.conversationId === null ? 'draft' : String(s.conversationId)],
+  )
   const error = useError()
   const pendingQuestion = useAgent((s) => {
     const key = s.bufferKey()
@@ -11037,7 +11155,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           </div>
         )}
         {objectiveText && (
-          <ObjectiveCard objective={objectiveText} iteration={goalIterationCount(messages)} />
+          <ObjectiveCard objective={objectiveText} iteration={goalIterationCount(messages)} todos={todos} />
         )}
         {messages.map((m) => (
           <MessageView key={m.id} msg={m} live={m.id === liveId} />
@@ -12060,6 +12178,14 @@ export function Composer({
       }
       if (ev.name === 'ask_user') {
         setPendingQuestion((q) => (q && q.callId === ev.call_id ? null : q))
+      }
+      // #855: TodoWrite carries the updated checklist in its result. Keep the
+      // store's todosByConv in sync so the goal card reflects it live.
+      if (ev.name === 'TodoWrite' && ev.result && typeof ev.result === 'object') {
+        const todos = (ev.result as { todos?: TodoItem[] }).todos
+        if (Array.isArray(todos)) {
+          useAgent.getState().setTodos(bufKey, todos)
+        }
       }
       if (ev.name === 'exit_plan') {
         setPendingPlanApproval((p) => (p && p.callId === ev.call_id ? null : p))
