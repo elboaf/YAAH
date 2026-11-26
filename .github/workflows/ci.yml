@@ -41,7 +41,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # undici 8.x (transitive via vitest) requires node >=22.19.0 — its
+          # decompress interceptor calls zlib.createZstdDecompress, undefined
+          # on Node 20, which makes every forks worker die at module load with
+          # "Cannot read properties of undefined (reading 'bind')".
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
