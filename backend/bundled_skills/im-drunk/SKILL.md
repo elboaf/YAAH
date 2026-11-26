@@ -37,8 +37,10 @@ thinking was good.
   canonical set (`needs-triage` is the default for new issues).
 - **Impaired declared while implementation is in flight.** If the user declares
   themselves impaired mid-session while implementation work is running, stop
-  that work immediately. No rollback, no new edits, no new commits; the existing
-  work stands as-is pending sober review. Then apply the read-only session rules.
+  making new edits. A running tool stops early only if the user presses Stop or
+  steers the run; otherwise the agent stops at the next step boundary and makes
+  no further edits. No rollback, no new commits; the existing work stands as-is
+  pending sober review. Then apply the read-only session rules.
 
 ## The interrogation (mini-grill)
 
@@ -71,6 +73,12 @@ Label it `needs-triage` (the target repo's equivalent default if it defines
 its own convention). By tracker convention, agents only pick up
 `ready-for-agent` issues — so this sits untouched until a sober human triages
 it. That gate working is the point; do not relabel, assign, or escalate it.
+
+Before creating any issue, show the complete proposed issue text — title, the
+two-column grill, open questions, and context — to the user and get explicit
+approval. Automatic activation alone must never publish: the impairment-reporting
+workflow stops and waits for a clear yes before creating the issue, and it never
+publishes the impairment statement without that approval.
 
 Then close the session: summarize the issue link back to the user, remind
 them nothing was changed in the tree, and stop. Do not start any other work.
