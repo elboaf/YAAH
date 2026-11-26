@@ -2801,7 +2801,12 @@ export function RemoteTranscriptDialog({
           {editing && draftMessages && <p className="mb-2 font-mono text-[10px] text-emerald-400">EDIT LEASE HELD · transcript-only changes; composer disabled while editing</p>}
           {!editing && sendNote && <p role="status" className="mb-2 text-xs text-red-400">{sendNote}</p>}
           {renderedMessages?.length === 0 && <p className="py-4 text-xs text-zinc-500">This device chat has no messages yet.</p>}
-          {remoteObjective && (
+          // #844 follow-up: the remote objective is the root prompt (first user
+          // message), which is also rendered as the first transcript row. Show the
+          // goal banner only when it carries something beyond that row, so the root
+          // prompt isn't duplicated (banner + bubble). The first row stays intact,
+          // so any images/media it carries still render.
+          {remoteObjective && remoteObjective !== (renderedMessages.find((m) => m.role === 'user')?.content ?? '') && (
             <ObjectiveCard objective={remoteObjective} iteration={goalIterationCount(renderedMessages ?? [])} />
           )}
           {renderedMessages && renderedMessages.length > 0 && <div className="space-y-4">{renderedMessages.map((message, index) => editing ? <label key={message.id} className="block"><span className="mb-1 block font-mono text-[10px] text-zinc-500">{message.role}</span><textarea aria-label={`Edit ${message.role} message ${index + 1}`} className="min-h-20 w-full rounded   bg-zinc-950 p-2 text-sm text-zinc-200" value={message.content} onChange={(event) => setDraftMessages((current) => current?.map((item, itemIndex) => itemIndex === index ? { ...item, content: event.target.value } : item) ?? null)} /></label> : <MessageView key={message.id} msg={message}/> )}</div>}
