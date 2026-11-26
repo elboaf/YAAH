@@ -799,6 +799,12 @@ export const useAgent = create<AgentState>((set, get) => ({
     set((s) => ({
       conversationId: null,
       messagesByConv: { ...s.messagesByConv, draft: [] },
+      // #844 follow-up: drop the draft's seeded objective. A draft's first
+      // message seeds objectiveByConv['draft'], but leaving it here would make
+      // the objective card show the previous conversation's text on a brand-new
+      // empty chat (the draft key is reused across new chats). The card must
+      // stay empty until the new draft's own first user message arrives.
+      objectiveByConv: { ...s.objectiveByConv, draft: '' },
       // The new draft belongs to the workspace selected BEFORE this call:
       // every entry point (sidebar group click, add-workspace flows, the
       // New chat button after setWorkspace) sets s.workspace first, and the
