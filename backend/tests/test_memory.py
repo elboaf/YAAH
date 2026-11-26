@@ -128,6 +128,17 @@ def test_index_for_prompt_caps_long_index():
     assert "…[truncated]" in block
 
 
+def test_index_for_prompt_rendered_block_stays_within_cap():
+    """The trim decision sizes on the full rendered block (body + wrapper +
+    marker), not the body alone, so the index never runs past MAX_INDEX_CHARS
+    once the wrapper is included. Fix split out of #833, tied to #818."""
+    for i in range(400):
+        memory.save_memory(WS, f"m-{i}", f"M{i}", "x" * 200, "project", "c")
+    block = memory.index_for_prompt(WS)
+    assert "…[truncated]" in block
+    assert len(block) <= memory.MAX_INDEX_CHARS
+
+
 def test_index_for_prompt_never_raises_on_corrupt_index(tmp_path):
     d = memory.ensure_dir(WS)
     (d / "MEMORY.md").write_bytes(b"\xff\xfe\x00broken")
