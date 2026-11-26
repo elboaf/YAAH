@@ -65,7 +65,7 @@ describe('remote ask_user (#308 follow-up)', () => {
     submitRemoteAnswer.mockResolvedValue({ ok: true })
 
     render(<RemoteTranscriptDialog hostId="host-a" conversationId="7" title="Remote chat" online deviceName="Host A" onClose={() => {}} />)
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'go' } })
@@ -106,7 +106,7 @@ describe('remote ask_user (#308 follow-up)', () => {
     })
 
     render(<RemoteTranscriptDialog hostId="host-a" conversationId="7" title="Remote chat" online deviceName="Host A" onClose={() => {}} />)
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'go' } })
     })

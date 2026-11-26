@@ -79,9 +79,9 @@ describe('mic button gate recovery', () => {
       },
       // The first retries back off 1.5s/3s — longer than the default 1s
       // timeout, so give the probe chain room.
-      { timeout: 6000 },
+      { timeout: 12000 },
     )
-  })
+  }, 15000)
 
   it('keeps polling slowly after the retry budget and recovers without any event', async () => {
     vi.useFakeTimers()

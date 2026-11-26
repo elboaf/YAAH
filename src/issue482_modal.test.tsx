@@ -31,7 +31,7 @@ describe('issue #482: modal streaming populates sidebar row dots', () => {
     render(<DeviceGroups devices={[device]} workspaces={[]} conversations={[]} onChange={() => {}} onOpenConversation={() => {}} adding={false} setAdding={() => {}} />)
     await screen.findByText('device chat')
     fireEvent.click(screen.getByText(/device chat/))
-    await screen.findByText('earlier')
+    await screen.findAllByText('earlier')
     expect(useAgent.getState().activeRemoteKey).toBe(KEY)
 
     streamRemoteTurn.mockImplementation(((_h: string, _c: string, _m: string, _w: string, _onEvent: (ev: { type: string }) => void) => {

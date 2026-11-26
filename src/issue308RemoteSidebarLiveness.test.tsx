@@ -151,7 +151,7 @@ describe('remote turn path (#308): status flows through setStatus', () => {
       <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
     )
     // On-screen while mounted: the store knows this remote chat is open.
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
     expect(useAgent.getState().activeRemoteKey).toBe(KEY)
 
     fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'run it' } })
@@ -176,7 +176,7 @@ describe('remote turn path (#308): status flows through setStatus', () => {
     render(
       <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
     )
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
     fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'run it' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() => expect(useAgent.getState().statusByConv[KEY]).toBe('idle'))
@@ -194,7 +194,7 @@ describe('remote turn path (#308): status flows through setStatus', () => {
     render(
       <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
     )
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
     fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'run it' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     // The failure lands mid-stream: the turn's rows stay, and the remote row
@@ -210,7 +210,7 @@ describe('remote turn path (#308): status flows through setStatus', () => {
     render(
       <RemoteTranscriptDialog hostId="host-a" conversationId="7" title="A chat" deviceName="A" online onClose={() => {}} />,
     )
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
     fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'run it' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     await waitFor(() =>

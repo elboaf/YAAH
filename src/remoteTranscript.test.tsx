@@ -75,8 +75,12 @@ describe('read-only remote transcript viewer', () => {
       </>,
     )
 
-    expect(await screen.findByText('transcript from host-a')).toBeTruthy()
-    expect(await screen.findByText('transcript from host-b')).toBeTruthy()
+    // The objective card re-states the first user message as a goal banner, so
+    // the root prompt now renders once (banner only, the transcript row is
+    // suppressed to avoid the duplicate). findAllByText still waits for the
+    // transcript to load before asserting.
+    expect(await screen.findAllByText('transcript from host-a')).toHaveLength(1)
+    expect(await screen.findAllByText('transcript from host-b')).toHaveLength(1)
     expect(screen.getByText(/cached transcript · read-only offline/)).toBeTruthy()
     expect(getRemoteDeviceMessages).toHaveBeenCalledWith('host-a', '7')
     expect(getRemoteDeviceMessages).toHaveBeenCalledWith('host-b', '7')
@@ -110,7 +114,7 @@ describe('read-only remote transcript viewer', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('Reconnect to this device'))
     getRemoteDeviceMessages.mockResolvedValue([row('cached after retry')])
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-    expect(await screen.findByText('cached after retry')).toBeTruthy()
+    expect(await screen.findAllByText('cached after retry')).toHaveLength(1)
   })
 })
 
@@ -130,7 +134,7 @@ describe('remote turn composer (#110)', () => {
     })
 
     renderDialog()
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
 
     const input = screen.getByLabelText('Message this device chat')
     fireEvent.change(input, { target: { value: 'run the tests' } })
@@ -148,13 +152,15 @@ describe('remote turn composer (#110)', () => {
     streamRemoteTurn.mockRejectedValue(new Error('503 device offline'))
 
     renderDialog()
-    await screen.findByText('earlier message')
+    await screen.findAllByText('earlier message')
 
     const input = screen.getByLabelText('Message this device chat')
     fireEvent.change(input, { target: { value: 'do a thing' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect((screen.getByLabelText('Message this device chat') as HTMLTextAreaElement).value).toBe('do a thing'))
-    expect(screen.getByRole('status').textContent).toContain('could not be sent')
+    // The objective card is also role="status"; scope to the error banner by
+    // its unique text so the objective card doesn't count as a match.
+    expect(screen.getByText(/could not be sent/).textContent).toContain('could not be sent')
   })
 })
