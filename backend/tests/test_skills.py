@@ -1,5 +1,7 @@
 """Skills registry: parsing, scanning, prompt injection, load_skill tool."""
 import json
+import os
+import time
 
 import pytest
 
@@ -248,12 +250,58 @@ def test_ensure_dir_seeds_bundled_into_existing_dir(skills_dir, monkeypatch):
     make_skill(src, "grill-me", description="interview")
     make_skill(src, "grilling", description="shipped version")
     monkeypatch.setattr(skill_registry, "bundled_source_dir", lambda: src)
+    # source older than the user copy -> user edits survive
+    old_t = int((skills_dir / "grilling" / "SKILL.md").stat().st_mtime_ns) - 10_000_000
+    os.utime(src / "grilling" / "SKILL.md", ns=(old_t, old_t))
     assert skill_registry.ensure_dir() is False
     assert (skills_dir / "grill-me" / "SKILL.md").is_file()
     assert "my edit" in (skills_dir / "grilling" / "SKILL.md").read_text(
         encoding="utf-8"
     )
 
+
+def test_ensure_dir_refreshes_skilled_md_when_bundled_newer(skills_dir, monkeypatch):
+    """An upgraded install gets a newer bundled SKILL.md; user edits to an
+    older copy survive when that copy is itself newer than the source."""
+    src = skills_dir / "_bundled_src"
+    src.mkdir()
+    make_skill(src, "grilling", description="shipped version")
+    monkeypatch.setattr(skill_registry, "bundled_source_dir", lambda: src)
+
+    # user copy older than the bundled source -> gets refreshed
+    user = skills_dir / "grilling"
+    user.mkdir()
+    (user / "SKILL.md").write_text(
+        "---\r\nname: grilling\r\ndescription: mine\r\n---\r\n\r\nold body\r\n",
+        encoding="utf-8",
+    )
+    user_mtime = (user / "SKILL.md").stat().st_mtime_ns
+    (src / "grilling" / "SKILL.md").write_text(
+        "---\r\nname: grilling\r\ndescription: shipped version\r\n---\r\n\r\nnew body\r\n",
+        encoding="utf-8",
+    )
+    newer = int(user_mtime) + 10_000_000
+    os.utime(src / "grilling" / "SKILL.md", ns=(newer, newer))
+    assert skill_registry.ensure_dir() is False
+    refreshed = (user / "SKILL.md").read_text(encoding="utf-8")
+    # the newer bundled body reached the existing install
+    assert "new body" in refreshed
+    assert "old body" not in refreshed
+    assert "shipped version" in refreshed
+
+    # user copy newer than the bundled source -> left untouched
+    (user / "SKILL.md").write_text(
+        "---\r\nname: grilling\r\ndescription: my edit\r\n---\r\n\r\nmy edit\r\n",
+        encoding="utf-8",
+    )
+    (src / "grilling" / "SKILL.md").write_text(
+        "---\r\nname: grilling\r\ndescription: shipped version\r\n---\r\n\r\nnew body\r\n",
+        encoding="utf-8",
+    )
+    older = int((user / "SKILL.md").stat().st_mtime_ns) - 10_000_000
+    os.utime(src / "grilling" / "SKILL.md", ns=(older, older))
+    assert skill_registry.ensure_dir() is False
+    assert "my edit" in (user / "SKILL.md").read_text(encoding="utf-8")
 
 def test_bodies_include_skill_folder(skills_dir):
     skill_registry.scan_skills()

@@ -140,6 +140,21 @@ def ensure_dir() -> bool:
         try:
             target = SKILLS_DIR / name
             if (target / "SKILL.md").exists():
+                # Existing install: keep supporting files, but refresh SKILL.md
+                # when the bundled source is newer so updates (new triggers,
+                # invocation metadata) reach existing installs without clobbering
+                # user edits to the skill content. A user copy newer than the
+                # source is left untouched.
+                try:
+                    src_mtime = (folder / "SKILL.md").stat().st_mtime_ns
+                    user_mtime = (target / "SKILL.md").stat().st_mtime_ns
+                    if src_mtime > user_mtime:
+                        (target / "SKILL.md").write_text(
+                            (folder / "SKILL.md").read_text(encoding="utf-8"),
+                            encoding="utf-8",
+                        )
+                except OSError:
+                    pass
                 continue
             target.mkdir(exist_ok=True)
             shutil.copytree(folder, target, dirs_exist_ok=True)
