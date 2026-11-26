@@ -749,6 +749,16 @@ describe('objective + goal iteration (#844 follow-up)', () => {
     useAgent.getState().setObjective('8', 'authoritative session goal')
     expect(useAgent.getState().objectiveByConv['8']).toBe('authoritative session goal')
   })
+
+  it('newConversation clears the draft objective so a fresh chat shows no goal card', () => {
+    const store = useAgent.getState()
+    // A draft's first message seeds the draft objective...
+    store.appendUserMessage('draft', 'whatsup with the pull requests', [])
+    expect(useAgent.getState().objectiveByConv['draft']).toBe('whatsup with the pull requests')
+    // ...but opening a new chat must drop it, so the empty window shows no card.
+    store.newConversation()
+    expect(useAgent.getState().objectiveByConv['draft']).toBe('')
+  })
 })
 
 // #226: persisted briefings ride the row's `say` column; hydration must
