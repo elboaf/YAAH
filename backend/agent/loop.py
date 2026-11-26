@@ -986,6 +986,12 @@ def _default_system_prompt(workspace: str = "") -> str:
         "request; creates it when missing)",
         "memory_save", "memory_read", "memory_search", "memory_delete",
         "search_conversation_history",
+        # #855: the multi-goal checklist. TodoWrite updates the checklist the
+        # goal card renders; TodoRead returns it. Both must be named here so
+        # the #181 prose/schema drift guard stays green.
+        "TodoWrite (break the objective into a checklist of sub-goals the goal "
+        "card shows; pass the complete updated list)",
+        "TodoRead (read the current multi-goal checklist the goal card shows)",
     ]
 
     # 1-3. Fixed core: identity + env + tools + guidelines + ask-user.
