@@ -346,6 +346,11 @@ interface AgentState {
    *  TodoWrite tool_result events. Drives the goal card's checklist. */
   todosByConv: Record<string, TodoItem[]>
   setTodos: (key: string, todos: TodoItem[]) => void
+  /** #856 follow-up: per-conversation checklist revision. Incremented on a
+   * live TodoWrite result so a late transcript response can be rejected if it
+   * would clobber a newer live update. */
+  checklistRevisionByConv: Record<string, number>
+  bumpChecklistRevision: (key: string) => void
 
   /**
    * Per-conversation telemetry tape: one ever-growing line that every tool
@@ -762,6 +767,14 @@ export const useAgent = create<AgentState>((set, get) => ({
   todosByConv: {},
   setTodos: (key, todos) =>
     set((s) => ({ todosByConv: { ...s.todosByConv, [key]: todos } })),
+  checklistRevisionByConv: {},
+  bumpChecklistRevision: (key) =>
+    set((s) => ({
+      checklistRevisionByConv: {
+        ...s.checklistRevisionByConv,
+        [key]: (s.checklistRevisionByConv[key] ?? 0) + 1,
+      },
+    })),
 
   tapeByConv: {},
   appendTape: (key, chunk) =>

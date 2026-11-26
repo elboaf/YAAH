@@ -2501,10 +2501,30 @@ const expandKey = (path: string | null) =>
 // carries the last accepted TodoWrite result in the tool_result row's `content`
 // (a parsed object with a `todos` array) — mirror the live-update path so the
 // remote card renders the checklist the same way the local path does.
-function hydrateRemoteTodos(rows: StoredMessage[] | null, key: string): void {
+//
+// #856 follow-up: apply only results matched to accepted TodoWrite calls. A
+// TodoRead fallback result ({"todos": []}) is also a tool result with a
+// `todos` array and must NOT overwrite the live checklist; an explicit
+// TodoWrite([]) clear is preserved because it is still a TodoWrite result.
+//
+// #856 follow-up (revision guard): only apply the hydrated list when no live
+// TodoWrite was accepted after the request began. Capture the conversation's
+// checklist revision before issuing the request; when the response arrives,
+// apply the hydrated list only if the revision is unchanged, so a late
+// transcript cannot clobber a newer live update. After a restart the store is
+// empty and no live update has occurred, so the revision is unchanged and the
+// hydrate still applies.
+function hydrateRemoteTodos(
+  rows: StoredMessage[] | null,
+  key: string,
+  snapshotRevision: number,
+): void {
   if (!rows) return
+  if ((useAgent.getState().checklistRevisionByConv[key] ?? 0) !== snapshotRevision) return
   for (const row of rows) {
     if (row.role !== 'tool') continue
+    const name = row.tool_calls?.[0]?.function?.name
+    if (name !== 'TodoWrite') continue
     const content = row.content
     if (!content || typeof content !== 'string') continue
     try {
@@ -2552,6 +2572,10 @@ export function RemoteTranscriptDialog({
     let cancelled = false
     setLoading(true)
     setError(null)
+    // Capture the conversation's checklist revision BEFORE issuing the
+    // request so we can reject a late transcript response that would clobber
+    // a newer live TodoWrite accepted while this request was pending.
+    const snapshotRevision = useAgent.getState().checklistRevisionByConv[remoteKey] ?? 0
     getRemoteDeviceMessages(hostId, conversationId)
       .then((rows) => {
         if (!cancelled) {
@@ -2561,7 +2585,7 @@ export function RemoteTranscriptDialog({
           // result. Hydrate the checklist from that result so the remote card
           // renders the checklist the same way the local path does (which
           // seeds from the conversation row's session_todos).
-          hydrateRemoteTodos(rows, remoteKey)
+          hydrateRemoteTodos(rows, remoteKey, snapshotRevision)
         }
       })
       .catch((e) => {
@@ -2789,6 +2813,10 @@ export function RemoteTranscriptDialog({
           const todos = (remoteResult as { todos?: TodoItem[] }).todos
           if (Array.isArray(todos)) {
             useAgent.getState().setTodos(remoteKey, todos)
+            // #856 follow-up: bump the checklist revision so a late transcript
+            // response (from a request that was pending when this write landed)
+            // is rejected by the revision guard in hydrateRemoteTodos.
+            useAgent.getState().bumpChecklistRevision(remoteKey)
           }
         }
         if (ev.name === 'ask_user') {
