@@ -12977,7 +12977,7 @@ export function Composer({
         className={`imp-composer rounded-lg border bg-zinc-800/50 transition-colors ${
           dragOver
             ? 'border-blue-500 border-dashed'
-            : ' border-zinc-800/40 focus-within:border-blue-500'
+            : ' border-zinc-800/50 focus-within:border-blue-500'
         }`}
       >
         {images.length > 0 && (

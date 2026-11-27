@@ -596,11 +596,33 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
   background-color: rgba(139, 92, 246, 0.16); /* violet-500 @16% */
   border: 1px solid rgba(139, 92, 246, 0.4);
   border-radius: 5px;
-  padding: 0 6px;
+  padding: 0 6px 0 6px;
   margin: 0 1px;
   white-space: nowrap;
   cursor: default;
   user-select: none;
+}
+/* The chip label. Kept separate so the remove × can sit beside it. */
+.skill-chip__label {
+  line-height: 1;
+}
+/* Remove affordance on the pill. Clicking it deletes the chip's `$name`
+   token from the serialized text (the composer is controlled, so removal is
+   a text change the value-sync rebuild renders). Backspace cannot reach an
+   inline element node, so the pill click is the reliable removal. */
+.skill-chip__remove {
+  margin-left: 4px;
+  padding-left: 4px;
+  border-left: 1px solid rgba(139, 92, 246, 0.4);
+  cursor: pointer;
+  color: #c4b5fd;
+  opacity: 0.5;
+  transition: opacity 0.12s ease-out, color 0.12s ease-out;
+  font-size: 0.9em;
+}
+.skill-chip__remove:hover {
+  opacity: 1;
+  color: #ffffff;
 }
 
 .imp-composer-wrap { min-width: 0; }

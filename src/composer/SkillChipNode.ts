@@ -39,9 +39,24 @@ export class SkillChipNode extends ElementNode {
   override createDOM(): HTMLElement {
     const span = document.createElement('span')
     span.className = 'skill-chip'
-    span.textContent = `$${this.skillName}`
     span.setAttribute('data-skill', this.skillName)
     span.setAttribute('contenteditable', 'false')
+    span.setAttribute('role', 'button')
+    span.setAttribute('title', `Remove skill ${this.skillName}`)
+    // The label. Kept in a span so the chip can carry a remove affordance
+    // (the ×) without changing what the send path scans.
+    const label = document.createElement('span')
+    label.className = 'skill-chip__label'
+    label.textContent = `$${this.skillName}`
+    span.append(label)
+    // Remove affordance. Clicking it bubbles to the composer root, where the
+    // click handler deletes the chip's `$name` token from the serialized text.
+    const remove = document.createElement('span')
+    remove.className = 'skill-chip__remove'
+    remove.setAttribute('aria-label', `Remove skill ${this.skillName}`)
+    remove.setAttribute('role', 'button')
+    remove.textContent = '×'
+    span.append(remove)
     return span
   }
 

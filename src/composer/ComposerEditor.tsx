@@ -281,6 +281,32 @@ const ComposerInner = ({
     return () => root.removeEventListener('paste', onPaste)
   }, [editorRootRef, onPasteFiles])
 
+  // Remove a skill chip when its pill is clicked. The composer is controlled
+  // (the parent owns `value`), so removal is expressed by deleting the chip's
+  // `$name` token from the serialized text and letting the value-sync effect
+  // rebuild without it. This works even for a chip backspace cannot reach: an
+  // inline element node is not atom-deletable, so one backspace leaves it
+  // put. Clicking the pill's × (or the pill itself) is the reliable removal.
+  useEffect(() => {
+    const root = editorRootRef.current
+    if (!root) return
+    const onChipClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      const chip = target?.closest?.('.skill-chip') as HTMLElement | null
+      if (!chip) return
+      e.stopPropagation()
+      e.preventDefault()
+      const name = chip.getAttribute('data-skill')
+      if (!name) return
+      const current = serializeEditorState(editor.getEditorState())
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const next = current.replace(new RegExp(`\\$${escaped}\\b`), '')
+      if (next !== current) onChange(next)
+    }
+    root.addEventListener('click', onChipClick)
+    return () => root.removeEventListener('click', onChipClick)
+  }, [editor, onChange])
+
   // Clipboard: convert selected chips to their literal `$name` tokens on copy.
   // Lexical's default range export skips inline element content, so chips would
   // otherwise be lost in clipboard text.
