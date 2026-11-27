@@ -23,7 +23,7 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 # Vendored tauri 2.12.4 (gtk ^0.18 -> 0.19, webkit2gtk ^2 -> =3.0.0) so the
 # whole chain resolves to webkit2gtk 3.0.0 / gtk-sys 0.19 / glib 0.22, which is
-# what the gtk-rs chain patch (gtk-rs-core 0.22.0) requires. See vendor/ notes.
+# what the gtk-rs chain patch (gtk-rs-core branch 0.22) requires. See vendor/ notes.
 tauri = { path = "vendor/tauri-2.12.4", features = [] }
 # Force exact transitive versions so the vendored webkit2gtk 3.0.0 patch is
 # selected deterministically (fresh resolves otherwise pick max versions and
@@ -67,7 +67,7 @@ windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundatio
 # glib ^0.18. No published or branch version of wry/tauri uses webkit2gtk 3.x, so
 # wry + tauri-runtime-wry + tauri-runtime are vendored under vendor/ with their
 # webkit2gtk pins bumped to =3.0.0, then re-pulled here via [patch.crates-io] path
-# overrides. The gtk-rs chain patch below (gtk-rs-core 0.22.0, gtk-rs 0.19.0) is
+# overrides. The gtk-rs chain patch below (gtk-rs-core branch 0.22, gtk-rs 0.19.0) is
 # exactly what webkit2gtk 3.0.0 requires.
 # libappindicator 0.10.0 (gtk ^0.19) replaces 0.9.0 (gtk ^0.18).
 # The same glib-2.0/gio-2.0/gobject-2.0 native libs are linked — no new system deps.
@@ -78,13 +78,17 @@ muda = { path = "vendor/muda-0.20.0" }
 tao = { path = "vendor/tao-0.37.0" }
 rfd = { path = "vendor/rfd-0.15.0" }
 tauri = { path = "vendor/tauri-2.12.4" }
-# Patch the registry glib-sys/gobject-sys (0.18.1/0.18.0) up to the
-# gtk-rs-core 0.22 branch so rfd's gtk3 feature (which requires ^0.22.11)
-# resolves to the SAME crate gtk-sys 0.19.0 depends on. Without this rfd's
-# glib_sys::GSList (0.18.1) and the chain's GSList (0.22.11) are distinct
-# types -> E0308 mismatched types at vendor/rfd-0.15.0/src/backend/gtk3/
-# file_dialog/dialog_ffi.rs:136. The tag 0.22.0 checkout is version 0.22.0,
-# which does NOT satisfy ^0.22.11, so point the patch at branch 0.22 (0.22.11).
+# Every gtk-rs-core patch MUST pin the SAME ref the forced gtk-rs 0.19.0 chain
+# already uses: branch 0.22 (currently 0.22.11 @ 33d328cfce9cc79ce3475d242ba3ebf68cfe619a).
+# Why the branch, not a tag: gtk-sys/gdk-sys/atk-sys 0.19.0 come from
+# git+gtk-rs?tag=0.19.0, and that workspace's manifest declares its glib chain
+# as `git = gtk-rs-core, branch = "0.22"`. [patch.crates-io] cannot redirect a
+# dependency that already carries an explicit git source, so the 0.19.0 chain is
+# FORCED onto branch=0.22 no matter what. If any patch line here pointed at a
+# tag (0.22.0 or 0.22.11), the graph would split into two distinct glib-sys
+# crates (tag vs branch, even at the same commit) and the webkit2gtk 3.0.0
+# stack would fail: E0308 in rfd (GSList), E0277 in javascriptcore-rs 2.0.0
+# (glib::Bytes vs glib_sys::GBytes) - see #886 for the full failure history.
 glib-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
 gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
 # Force tauri-runtime / tauri-runtime-wry to the vendored path versions
@@ -93,16 +97,16 @@ gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
 # registry versions with webkit2gtk =2.0.
 tauri-runtime = { path = "vendor/tauri-runtime-2.12.3" }
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.12.4" }
-glib = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-gio = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-cairo-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-cairo-sys-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-pango = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-pango-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-pangocairo = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-pangocairo-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-gdk-pixbuf = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-gdk-pixbuf-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+glib = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+gio = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+cairo-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+cairo-sys-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+pango = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+pango-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+pangocairo = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+pangocairo-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+gdk-pixbuf = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+gdk-pixbuf-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
 atk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
 atk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
 gdk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
