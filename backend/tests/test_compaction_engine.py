@@ -112,20 +112,26 @@ class TestSummaryPrompt:
 async def test_load_history_injects_summary_and_skips_watermark():
     cid = await create_conversation("folded")
     # Rows 1-3 are the folded (old) part; rows 4-5 are the recent part.
-    for mid, role, content in [
-        (1, "user", "old turn one"),
-        (2, "assistant", "old reply"),
-        (3, "tool", "old tool result"),
-        (4, "user", "new turn"),
-        (5, "assistant", "new reply"),
+    for role, content in [
+        ("user", "old turn one"),
+        ("assistant", "old reply"),
+        ("tool", "old tool result"),
+        ("user", "new turn"),
+        ("assistant", "new reply"),
     ]:
         await loop_mod.add_message(cid, role, content)
+    # Set the watermark against the actual row ids (they start at whatever the
+    # throwaway DB hands out, not necessarily 1). The first three rows are the
+    # folded part; the watermark is the newest of them.
+    persisted = await get_messages(cid)
+    old_ids = [r["id"] for r in persisted[:3]]
+    watermark = max(old_ids)
     # Apply the fold on the conversation row (immutable).
     await update_conversation(
         cid,
         touch_updated_at=False,
         compaction_summary="SUMMARY OF OLD TURNS",
-        compaction_watermark=3,
+        compaction_watermark=int(watermark),
     )
     replayed = await loop_mod.load_history(cid)
     # The folded rows are gone; only the recent rows survive in the replay.
