@@ -112,11 +112,18 @@ describe('remote ask_user (#308 follow-up)', () => {
       fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'go' } })
     })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /send/i })) })
-    // The question must park and render before the stream fails. Waiting on the
-    // rendered question (not a fixed 20ms timer) removes the race: under CI load
-    // a setTimeout reject can land between React's render and waitFor's next
-    // poll, so the parked question never appears.
-    await waitFor(() => expect(screen.getByText('which?')).toBeTruthy())
+    // The question parks synchronously in the store when the mock fires
+    // tool_start (Zustand updates are synchronous), so assert on the store
+    // state, not the DOM: under CI load React's render of the card can lag
+    // behind the store write, and waiting on getByText('which?') races the
+    // render. The store write is the deterministic signal that the card will
+    // render.
+    await waitFor(() => expect(useAgent.getState().pendingQuestions[KEY]).toEqual({
+      callId: 'c1',
+      question: 'which?',
+      options: [],
+      convKey: KEY,
+    }))
     // Fail the stream mid-turn now; the parked question can never be answered.
     await act(async () => { rejectStream!(new Error('stream died')) })
     await waitFor(() => expect(useAgent.getState().statusByConv[KEY]).toBe('error'))
