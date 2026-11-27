@@ -383,6 +383,7 @@ const ComposerInner = ({
             ref={editorRootRef}
             role="textbox"
             aria-label="Message the agent"
+            style={{ outline: 'none' }}
           />
         </div>
       }
