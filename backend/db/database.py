@@ -322,6 +322,20 @@ async def get_db() -> aiosqlite.Connection:
         return db
     # Idempotent: ensures schema exists even for direct calls outside app lifespan
     await db.executescript(SCHEMA)
+    # Run the whole migration under one write lock (see #883). Two worker
+    # processes (pytest -n 2) each guard this block with the process-global
+    # _migrated set, so both can be inside at once. The per-connection schema
+    # check below reads PRAGMA table_info against whatever the DB already holds:
+    # without the lock, a second process can snapshot the schema after the first
+    # has committed compaction_summary but before it has committed
+    # compaction_watermark, then skip the watermark ALTER and mark itself done.
+    # That connection is then permanently missing the column (its reads of the
+    # row return a dict with compaction_summary but no compaction_watermark key),
+    # which is exactly the flaky fold-replay failure. BEGIN IMMEDIATE makes the
+    # migration atomic across processes: a second worker either sees the
+    # pre-migration schema (and runs every ALTER) or blocks until the first
+    # commits, then sees the fully-migrated schema.
+    await db.execute("BEGIN IMMEDIATE")
     # Migrations: CREATE TABLE IF NOT EXISTS won't touch an existing table.
     cur = await db.execute("PRAGMA table_info(messages)")
     cols = {r[1] for r in await cur.fetchall()}
@@ -518,6 +532,14 @@ async def get_db() -> aiosqlite.Connection:
         # backfill: a legacy `position = id` backfill made old workspaces
         # read as arbitrarily hand-ordered.
         await db.execute("ALTER TABLE workspaces ADD COLUMN position INTEGER")
+    # Commit the schema migration as one atomic transaction: by now every
+    # column has been added or dropped, and any worker that raced in blocked
+    # on this write lock until the commit lands, so it reads a fully migrated
+    # schema rather than a half-altered one. The triggers and data helpers
+    # below each run their own transaction (and _backfill_fts5_index /
+    # _migrate_vector_index_foreign_keys open their own BEGIN IMMEDIATE), so
+    # they must not run inside this outer transaction.
+    await db.commit()
     # Revision tokens change for every host-side metadata/transcript edit,
     # including legacy local routes, not just commits through the new API.
     # The two UPDATE triggers are dropped and recreated rather than
@@ -554,8 +576,11 @@ async def get_db() -> aiosqlite.Connection:
     await _backfill_fts5_index(db)
     await _migrate_vector_index_foreign_keys(db)
     await migrate_workspaces(db)
-    # Mark migration complete after both finish so a failure leaves the
-    # path eligible for retry.
+    # Mark the migration complete so a later connection skips this whole
+    # block. The schema transaction itself already committed at the ALTER
+    # boundary above (see the BEGIN IMMEDIATE there); these data helpers run
+    # their own transactions. Leaving the marker here means a failure in any
+    # helper still retries the whole migration on the next boot.
     _migrated.add(str(DB_PATH))
     return db
 
