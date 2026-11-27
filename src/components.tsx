@@ -10356,15 +10356,21 @@ export function ChatScopePickers() {
           useAgent.getState().setObjective(String(conversationId), c.session_goal || '')
           // #855: seed the durable multi-goal checklist from the conversation
           // row's session_todos (authoritative — survives resume/restart).
-          const rawTodos = c.session_todos
-          if (rawTodos) {
-            try {
-              const parsed = JSON.parse(rawTodos) as TodoItem[]
-              if (Array.isArray(parsed)) {
-                useAgent.getState().setTodos(String(conversationId), parsed)
+          // #867: guard on checklistRevision — a live TodoWrite already ran
+          // (revision bumped) means the live update is newer than this persisted
+          // snapshot, so a late conversation-row seed must NOT clobber it. The
+          // remote live-hydrate path guards the same way (hydrateRemoteTodos).
+          if ((useAgent.getState().checklistRevisionByConv[String(conversationId)] ?? 0) === 0) {
+            const rawTodos = c.session_todos
+            if (rawTodos) {
+              try {
+                const parsed = JSON.parse(rawTodos) as TodoItem[]
+                if (Array.isArray(parsed)) {
+                  useAgent.getState().setTodos(String(conversationId), parsed)
+                }
+              } catch {
+                // malformed — leave it empty, TodoWrite will repopulate
               }
-            } catch {
-              // malformed — leave it empty, TodoWrite will repopulate
             }
           }
         }
