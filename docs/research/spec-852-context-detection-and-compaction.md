@@ -5,7 +5,10 @@
 > was shipped) and ADR 0020 (the same feature, removed entirely after six rounds
 > of failures). `zcode` here is `zai-org/ZCode` — Z.ai's GLM harness (confirmed in
 > `docs/research/zcode-evaluation.md`); it is **not** the unrelated `zerx-lab/zcode`
-> terminal agent.
+> terminal agent. The compaction-engine analysis ported below (policy, manual,
+> rounds, prompt, microcompact, active-selection) is drawn from the research
+> embedded in issue #852's own body; `zcode-evaluation.md` documents the same
+> repo's computer-use and browser-use stacks, not this engine.
 
 ## Problem Statement
 
