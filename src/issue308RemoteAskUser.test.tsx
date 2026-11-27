@@ -98,10 +98,11 @@ describe('remote ask_user (#308 follow-up)', () => {
   })
 
   it('a mid-stream failure clears the parked question (it can never be answered)', async () => {
+    let rejectStream: ((e: Error) => void) | null = null
     streamRemoteTurn.mockImplementation((_h, _c, _m, _w, onEvent) => {
       return new Promise((_resolve, reject) => {
+        rejectStream = reject
         onEvent({ type: 'tool_start', name: 'ask_user', call_id: 'c1', args: { question: 'which?' } })
-        setTimeout(() => reject(new Error('stream died')), 20)
       })
     })
 
@@ -111,7 +112,13 @@ describe('remote ask_user (#308 follow-up)', () => {
       fireEvent.change(screen.getByLabelText('Message this device chat'), { target: { value: 'go' } })
     })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /send/i })) })
+    // The question must park and render before the stream fails. Waiting on the
+    // rendered question (not a fixed 20ms timer) removes the race: under CI load
+    // a setTimeout reject can land between React's render and waitFor's next
+    // poll, so the parked question never appears.
     await waitFor(() => expect(screen.getByText('which?')).toBeTruthy())
+    // Fail the stream mid-turn now; the parked question can never be answered.
+    await act(async () => { rejectStream!(new Error('stream died')) })
     await waitFor(() => expect(useAgent.getState().statusByConv[KEY]).toBe('error'))
     await waitFor(() => expect(useAgent.getState().pendingQuestions[KEY]).toBeUndefined())
   })
