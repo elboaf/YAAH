@@ -16,7 +16,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin'
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin'
 import { ContentEditable } from '@lexical/react/LexicalContentEditable'
-import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, $isElementNode, $isTextNode, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, $setSelection, $createRangeSelection, $createPoint, COPY_COMMAND } from 'lexical'
+import { $getRoot, $createTextNode, $createParagraphNode, PASTE_COMMAND, $isElementNode, $isTextNode, type LexicalEditor, $isNodeSelection, $isRangeSelection, $getSelection, $setSelection, $createRangeSelection, $createPoint, COPY_COMMAND, $getNodeFromDOMNode, $getNodeByKey } from 'lexical'
 import { composerEditableStyle, composerTheme, serializeEditorState } from './createComposerEditor'
 import { SkillChipNode } from './SkillChipNode'
 import { ComposerErrorBoundary } from './ComposerErrorBoundary'
@@ -287,6 +287,13 @@ const ComposerInner = ({
   // rebuild without it. This works even for a chip backspace cannot reach: an
   // inline element node is not atom-deletable, so one backspace leaves it
   // put. Clicking the pill's × (or the pill itself) is the reliable removal.
+  //
+  // The click is resolved to the Lexical node behind the clicked DOM element,
+  // and that specific node is removed (not the first `$name` token in the
+  // serialized text). A regex on the text would match the prefix of a
+  // differently-named sibling chip (`$ask-matt $ask` -> `-matt $ask`) and
+  // always remove the first occurrence, so duplicate-named chips could never
+  // be removed in turn.
   useEffect(() => {
     const root = editorRootRef.current
     if (!root) return
@@ -294,18 +301,21 @@ const ComposerInner = ({
       const target = e.target as HTMLElement | null
       const chip = target?.closest?.('.skill-chip') as HTMLElement | null
       if (!chip) return
+      // Resolve the clicked chip to its Lexical node and remove just that one.
+      // `editor.read` puts a callback in the active-editor context that
+      // `$getNodeFromDOMNode` needs.
+      const node = editor.read(() => $getNodeFromDOMNode(chip))
+      editor.update(() => {
+        if (node && $getNodeByKey(node.getKey()) === node) {
+          node.remove()
+        }
+      })
       e.stopPropagation()
       e.preventDefault()
-      const name = chip.getAttribute('data-skill')
-      if (!name) return
-      const current = serializeEditorState(editor.getEditorState())
-      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const next = current.replace(new RegExp(`\\$${escaped}\\b`), '')
-      if (next !== current) onChange(next)
     }
     root.addEventListener('click', onChipClick)
     return () => root.removeEventListener('click', onChipClick)
-  }, [editor, onChange])
+  }, [editor, editorRootRef])
 
   // Clipboard: convert selected chips to their literal `$name` tokens on copy.
   // Lexical's default range export skips inline element content, so chips would

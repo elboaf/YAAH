@@ -1489,12 +1489,12 @@ export function GoalOverlay({
   const completedCount = todos.filter((t) => t.status === 'completed').length
   return (
     <div
-      className="fixed right-5 bottom-28 z-[60] w-[min(340px,90vw)] rounded-lg border border-zinc-800/50 bg-zinc-900/95 shadow-2xl"
+      className="fixed right-5 bottom-28 z-[60] w-[min(340px,90vw)] rounded-lg border border-zinc-800/50 bg-zinc-900/95 shadow-2xl flex flex-col max-h-[calc(100vh-7rem)] overflow-hidden"
       role="status"
       aria-label="Goal checklist"
     >
-      <div className="flex items-center justify-between border-b border-zinc-800/50 px-3 py-2">
-        <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center justify-between border-b border-zinc-800/50 px-3 py-2">
+        <div className="flex shrink-0 items-center gap-2 overflow-hidden">
           <span aria-hidden="true" className="lg-caret">◆</span>
           <span className="lg-title">goal</span>
           {iteration > 1 && (
@@ -1513,8 +1513,8 @@ export function GoalOverlay({
           ×
         </button>
       </div>
-      <div className="px-3 py-2 text-xs leading-snug text-zinc-200">{objective}</div>
-      <ul className="max-h-64 space-y-0.5 overflow-y-auto px-3 pb-3 pt-1">
+      <div className="shrink-0 px-3 py-2 text-xs leading-snug text-zinc-200 overflow-x-auto whitespace-pre-wrap break-words">{objective}</div>
+      <ul className="shrink-0 flex-1 space-y-0.5 overflow-y-auto px-3 pb-3 pt-1">
         {todos.map((t, i) => (
           <li key={i} className="flex items-start gap-2 text-[11px] leading-snug">
             <span
@@ -11139,10 +11139,19 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     }
   }, [pendingQuestion, ttsEnabled, ttsReady, speakQuestion])
   // #855: show the floating checklist overlay as soon as the agent creates a
-  // checklist (ycode/zcode behaviour) — no user action needed.
+  // checklist (ycode/zcode behaviour) — no user action needed. Open it when a
+  // checklist first appears or the conversation changes, so a later TodoWrite
+  // that replaces `todos` does not reopen an overlay the user already
+  // dismissed. The live `todos` are still passed through, so the overlay
+  // stays in sync while it is open.
+  const seenConversationRef = useRef<number | null>(null)
   useEffect(() => {
-    if (todos && todos.length > 0) setShowGoalOverlay(true)
-  }, [todos])
+    const key = conversationId ?? null
+    if (seenConversationRef.current !== key) {
+      seenConversationRef.current = key
+      if (todos && todos.length > 0) setShowGoalOverlay(true)
+    }
+  }, [todos, conversationId])
   // Persist the toggle; the backend merges it into voice.tts_enabled.
   const toggleTts = () => {
     const next = !ttsEnabled

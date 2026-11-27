@@ -41,20 +41,23 @@ export class SkillChipNode extends ElementNode {
     span.className = 'skill-chip'
     span.setAttribute('data-skill', this.skillName)
     span.setAttribute('contenteditable', 'false')
-    span.setAttribute('role', 'button')
-    span.setAttribute('title', `Remove skill ${this.skillName}`)
-    // The label. Kept in a span so the chip can carry a remove affordance
-    // (the ×) without changing what the send path scans.
+    // The label. Kept in a plain span so the chip can carry a remove
+    // affordance (the ×) without changing what the send path scans, and so
+    // there is only one button role in the chip (no nested roles).
     const label = document.createElement('span')
     label.className = 'skill-chip__label'
     label.textContent = `$${this.skillName}`
     span.append(label)
-    // Remove affordance. Clicking it bubbles to the composer root, where the
-    // click handler deletes the chip's `$name` token from the serialized text.
-    const remove = document.createElement('span')
+    // A single, real removal control. A real <button> is focusable and
+    // operable by keyboard out of the box (Tab to focus, Enter or Space to
+    // activate) and already exposes the accessible name from its text, so no
+    // manual tabIndex, key handlers, or aria-label are needed. Clicking it
+    // bubbles to the composer root, where the click handler resolves the chip
+    // to its Lexical node and removes it.
+    const remove = document.createElement('button')
+    remove.type = 'button'
     remove.className = 'skill-chip__remove'
     remove.setAttribute('aria-label', `Remove skill ${this.skillName}`)
-    remove.setAttribute('role', 'button')
     remove.textContent = '×'
     span.append(remove)
     return span
