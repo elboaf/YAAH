@@ -297,6 +297,42 @@ async def test_invoked_skills_turn_does_not_poison_frozen_head(
 
 
 @pytest.mark.asyncio
+async def test_invoked_skill_block_at_tail_keeps_history_prefix(
+    monkeypatch, static_provider, one_skill
+):
+    """Turn-start chip block must ride a tail message AFTER the history
+    (#810 related gap: a this-turn-only block before the history shifted
+    every history message down a slot on the next turn, collapsing the
+    strict prompt prefix cache and re-prefilling the whole conversation).
+
+    The chip block is this-turn-only (never persisted), so the next turn
+    legitimately has no block; what must stay byte-identical is the cached
+    HEAD + history. Only the final chip-block message may differ."""
+    chat = HeadCapture()
+    monkeypatch.setattr(agent_loop.model_client, "chat", chat)
+    cid = await create_conversation("t", ".")
+
+    await run_turn(cid, skill_names=[one_skill])  # turn 1: chip invoked
+    await run_turn(cid)                            # turn 2: no chip
+
+    assert len(chat.calls) == 2
+    prev, curr = chat.calls[0], chat.calls[1]
+    # Turn 1 carries the chip block as the last message; turn 2 does not.
+    assert any("Invoked skills" in m["content"] for m in prev)
+    assert all("Invoked skills" not in m["content"] for m in curr)
+    # The chip block rides at the TAIL (last message). Everything before
+    # it -- the cached head plus the persisted history -- must stay
+    # byte-identical across turns, so the strict prompt prefix never
+    # shifts. Only the trailing message may legitimately differ.
+    for i in range(min(len(prev), len(curr)) - 1):
+        assert prev[i] == curr[i], (
+            f"strict prefix diverges at message {i} -- the chip block "
+            f"before the history shifted the cached history down a slot "
+            f"and re-prefilled everything from there"
+        )
+
+
+@pytest.mark.asyncio
 async def test_override_routes_static_decision_to_target_provider(
     monkeypatch, static_provider
 ):
