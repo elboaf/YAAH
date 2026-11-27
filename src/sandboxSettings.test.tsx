@@ -26,9 +26,6 @@ import { SandboxSettingsCard } from './components'
 // A Windows UA exercises the platform guard. Without it jsdom's default
 // UA (no "Windows") triggers the Windows-only guard and the card does
 // not render.
-const windowsAgent =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-
 describe('Windows Sandbox settings card (#112)', () => {
   beforeEach(() => {
     getConfig.mockResolvedValue({
