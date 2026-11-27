@@ -17,6 +17,8 @@ src-tauri/target/
 *.db
 # PyInstaller sidecar build artifacts
 build/
+# Gradle build cache/state (regenerable, per-machine) - never commit
+android/.gradle/
 *.spec
 src-tauri/binaries/
 

@@ -375,3 +375,130 @@ jobs:
               || { echo "::error::asset missing from release: $f"; rc=1; }
           done
           exit $rc
+
+  apk:
+    name: Build Android thin-client APK (Linux)
+    # Android thin client, built on the Linux runner alongside the desktop /
+    # server installers and uploaded to the same release. Debug build
+    # (auto-signed by Gradle) - the app has no release signing config, and a
+    # debug APK is the installable artifact used for RC device verification.
+    needs: tests
+    runs-on: Linux
+    permissions:
+      contents: write
+    env:
+      # Pinned for a reproducible artifact. compileSdk/targetSdk is 34 and the
+      # project pins AGP 8.1.2, which needs Gradle 8.0+; the thin client builds
+      # on Gradle 8.5 (the 9.7.1 wrapper is incompatible). No wrapper exists in
+      # android/, so Gradle is provisioned here explicitly.
+      ANDROID_TOOLS_VERSION: "11076708"
+      ANDROID_SDK_ROOT: "$RUNNER_TEMP/android-sdk"
+      GRADLE_VERSION: "8.5"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+          cache: gradle
+
+      - name: Provision Gradle 8.5
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_HOME="$RUNNER_TEMP/gradle-$GRADLE_VERSION"
+          if [ ! -x "$GRADLE_HOME/$GRADLE_VERSION/bin/gradle" ]; then
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/gradle.zip" \
+              "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
+            unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
+          fi
+          echo "$GRADLE_HOME/$GRADLE_VERSION/bin" >> "$GITHUB_PATH"
+          gradle --version | sed -n '1,4p'
+
+      - name: Set up Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ANDROID_SDK_ROOT="$RUNNER_TEMP/android-sdk"
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+          cd "$ANDROID_SDK_ROOT/cmdline-tools"
+          curl -fsSL --retry 3 -o tools.zip \
+            "https://dl.google.com/android/repository/commandline-tools-linux-${ANDROID_TOOLS_VERSION}.zip"
+          unzip -q tools.zip
+          mv cmdline-tools latest
+          # platform-34 for compileSdk/targetSdk 34, build-tools 34.0.0 for AGP 8.1,
+          # platform-tools for adb. --accept-licenses avoids the interactive prompt.
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            --accept-licenses --announce-license \
+            "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Point local.properties at the Linux SDK
+        # The repo ships android/local.properties with a Windows sdk.dir; overwrite
+        # it on the runner (ephemeral, never committed) so Gradle finds the SDK.
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+          cat android/local.properties
+
+      - name: Build debug APK
+        shell: bash
+        working-directory: android
+        run: |
+          set -euo pipefail
+          gradle :app:assembleDebug --no-daemon --stacktrace 2>&1 | tee build-apk.log
+          if [ ! -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            echo "::error::APK not produced"
+            tail -40 build-apk.log
+            exit 1
+          fi
+
+      - name: Rename APK for the release asset
+        shell: bash
+        working-directory: android
+        run: mv app/build/outputs/apk/debug/app-debug.apk yaah-android.apk
+
+      - name: Report failure cause
+        if: failure()
+        shell: bash
+        run: |
+          grep -inE "error(\[E[0-9]+\])?:|error:|FAILED|what went wrong" android/build-apk.log \
+            | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+          (free -h || true) 2>/dev/null
+          (df -h android || true) 2>/dev/null
+
+      - name: Upload APK to release
+        if: success()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          tag="${RELEASE_TAG:-${GITHUB_REF_NAME}}"
+          files="yaah-android.apk"
+          release_args=("$tag" --title "$tag" --generate-notes)
+          if [ "${{ inputs.prerelease }}" = "true" ] || echo "$tag" | grep -Eq -- '-rc\.[0-9]+$'; then
+            release_args+=(--prerelease)
+          fi
+          gh release view "$tag" >/dev/null 2>&1 || {
+            gh release create "${release_args[@]}" || gh release view "$tag" >/dev/null 2>&1 || exit 1
+          }
+          rc=0
+          for f in $files; do
+            ok=0
+            for attempt in 1 2 3 4 5 6; do
+              if gh release upload "$tag" "$f" --clobber; then ok=1; break; fi
+              echo "::warning::upload attempt $attempt failed for $f, retrying"
+              sleep 20
+            done
+            [ "$ok" = 1 ] || { echo "::error::gave up uploading $f"; rc=1; }
+          done
+          for f in $files; do
+            gh release view "$tag" --json assets -q '.assets[].name' | grep -Fx "$(basename "$f")" \
+              || { echo "::error::asset missing from release: $f"; rc=1; }
+          done
+          exit $rc
