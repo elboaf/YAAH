@@ -1489,7 +1489,7 @@ export function GoalOverlay({
   const completedCount = todos.filter((t) => t.status === 'completed').length
   return (
     <div
-      className="fixed right-5 bottom-28 z-[60] w-[min(340px,90vw)] rounded-lg border border-zinc-800/50 bg-zinc-900/95 shadow-2xl flex flex-col max-h-[calc(100vh-7rem)] overflow-hidden"
+      className="fixed right-5 top-5 z-[60] w-[min(340px,90vw)] rounded-lg border border-zinc-800/50 bg-zinc-900/95 shadow-2xl flex flex-col max-h-[calc(100vh-7rem)] overflow-hidden"
       role="status"
       aria-label="Goal checklist"
     >
