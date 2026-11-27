@@ -2385,10 +2385,6 @@ async def _run_agent_claimed(
             tail_slot,
             {"role": "user", "content": persisted_skill_tail},
         )
-    if static_mode and invoked_skill_block:
-        messages.append(
-            {"role": "user", "content": invoked_skill_block}
-        )
     # #844: the durable objective, as a tail message after history so it reads
     # as the most recent reminder (recency) and never displaces a real first
     # user message in the transcript. Kept out of the frozen head (see goal.py)
@@ -2412,6 +2408,18 @@ async def _run_agent_claimed(
         _todo_tail = todo_mod.todo_state_message(session_todos)
         if _todo_tail:
             messages.append(_todo_tail)
+    # Static mode, invoked skills: the this-turn-only instruction bodies ride
+    # a tail message AFTER the history so the chip block is the last message.
+    # Being after the history (and after the stable objective/todo tails) means
+    # the chip block never shifts the cached head + history + objective + todo
+    # prefix on the next turn, when it is gone. A this-turn-only trailing block
+    # only costs a tail re-prefill, never a cache miss on the whole prefix.
+    # Role: user — strict chat templates reject a second system message (see
+    # load_skill_into_messages; same tail-message class).
+    if static_mode and invoked_skill_block:
+        messages.append(
+            {"role": "user", "content": invoked_skill_block}
+        )
     # Static mode, freeze turn: persist the head exactly as this turn's
     # model call sends it, alongside the workspace it was built under, awaited
     # inline so a race with the NEXT turn's read is impossible (a detached
