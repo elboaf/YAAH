@@ -11139,17 +11139,36 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     }
   }, [pendingQuestion, ttsEnabled, ttsReady, speakQuestion])
   // #855: show the floating checklist overlay as soon as the agent creates a
-  // checklist (ycode/zcode behaviour) — no user action needed. Open it when a
-  // checklist first appears or the conversation changes, so a later TodoWrite
-  // that replaces `todos` does not reopen an overlay the user already
-  // dismissed. The live `todos` are still passed through, so the overlay
-  // stays in sync while it is open.
-  const seenConversationRef = useRef<number | null>(null)
+  // checklist (ycode/zcode behaviour) — no user action needed. Open it when
+  // the FIRST checklist for a conversation arrives, so a conversation that
+  // starts with no todos (or an initial draft with both IDs null) still opens
+  // the moment the first TodoWrite or session hydration supplies a checklist.
+  // A later TodoWrite that replaces `todos` does not reopen an overlay the
+  // user already dismissed. The live `todos` are still passed through, so the
+  // overlay stays in sync while it is open.
+  const openedForConvRef = useRef<number | null>(null)
+  const dismissedRef = useRef(false)
+  // Track dismissal in sync with the real overlay visibility: true when the
+  // overlay is hidden, so a later checklist replacement can tell whether the
+  // user already dismissed.
+  useEffect(() => {
+    dismissedRef.current = !showGoalOverlay
+  }, [showGoalOverlay])
   useEffect(() => {
     const key = conversationId ?? null
-    if (seenConversationRef.current !== key) {
-      seenConversationRef.current = key
-      if (todos && todos.length > 0) setShowGoalOverlay(true)
+    const hasChecklist = todos != null && todos.length > 0
+    if (openedForConvRef.current !== key) {
+      // Conversation changed (or first run): reset tracking and open if a
+      // checklist is already present.
+      openedForConvRef.current = key
+      dismissedRef.current = false
+      if (hasChecklist) setShowGoalOverlay(true)
+      return
+    }
+    // Same conversation as when we opened. Reopen on a checklist replacement
+    // only if the user has not dismissed it; otherwise leave it dismissed.
+    if (hasChecklist && !dismissedRef.current) {
+      setShowGoalOverlay(true)
     }
   }, [todos, conversationId])
   // Persist the toggle; the backend merges it into voice.tts_enabled.

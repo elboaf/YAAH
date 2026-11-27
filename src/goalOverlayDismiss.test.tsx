@@ -75,4 +75,26 @@ describe('goal overlay preserves dismissal (PR #860)', () => {
 
     expect(screen.getByLabelText('Goal checklist')).toBeTruthy()
   })
+
+  it('opens when the first checklist arrives after mount (conversation started empty)', () => {
+    // Conversation 42 starts with NO todos — the exact case the tracking-by-id
+    // fix missed: the effect recorded 42 without opening, so the first
+    // TodoWrite that later supplies todos was blocked by the unchanged ID.
+    useAgent.setState({
+      conversationId: 42,
+      todosByConv: { '42': [] },
+    })
+    render(<ChatPanel />)
+    expect(screen.queryByLabelText('Goal checklist')).toBeNull()
+
+    // The first TodoWrite supplies the checklist.
+    act(() => {
+      useAgent.setState({
+        todosByConv: { '42': [todo('first task')] },
+      })
+    })
+
+    // The overlay must open on that first checklist.
+    expect(screen.getByLabelText('Goal checklist')).toBeTruthy()
+  })
 })

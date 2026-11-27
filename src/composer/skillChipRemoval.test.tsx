@@ -163,4 +163,53 @@ describe('composer: skill chip removal (PR #860)', () => {
       { timeout: 1000 },
     )
   })
+
+  it('stops Enter keydown from propagating to the composer send handler', async () => {
+    const { container } = render(<Composer />)
+    const box = screen.getByLabelText('Message the agent') as HTMLElement
+
+    // Spy on keydown events bubbling up to the composer root (the container).
+    let reachedRoot = false
+    const spy = vi.fn((e: KeyboardEvent) => {
+      if (e.key === 'Enter') reachedRoot = true
+    })
+    container.addEventListener('keydown', spy)
+
+    const editor = (box as unknown as { __editor?: { update: (fn: () => void) => void } }).__editor
+    await act(async () => {
+      if (!editor) return
+      await editor.update(() => {
+        const root = $getRoot()
+        root.clear()
+        const para = $createParagraphNode()
+        para.append($createTextNode('$ask'))
+        root.append(para)
+      })
+    })
+    fireEvent.input(box)
+
+    await waitFor(
+      () => {
+        const chip = container.querySelector('[data-skill="ask"]') as HTMLElement | null
+        expect(chip).toBeTruthy()
+      },
+      { timeout: 1000 },
+    )
+
+    // Focus the removal button and press Enter.
+    const remove = container.querySelector('button.skill-chip__remove') as HTMLButtonElement | null
+    expect(remove).toBeTruthy()
+    act(() => {
+      remove?.focus()
+    })
+    act(() => {
+      fireEvent.keyDown(remove!, { key: 'Enter' })
+    })
+
+    // The keydown must NOT have bubbled up to the composer root, so the
+    // send handler never sees it.
+    expect(reachedRoot).toBe(false)
+
+    container.removeEventListener('keydown', spy)
+  })
 })

@@ -59,6 +59,16 @@ export class SkillChipNode extends ElementNode {
     remove.className = 'skill-chip__remove'
     remove.setAttribute('aria-label', `Remove skill ${this.skillName}`)
     remove.textContent = '×'
+    // Keep this button's Enter out of the composer's send shortcut: when the
+    // button is focused, Enter bubbles up through the composer root to its
+    // onKeyDown, which would call send() instead of removing the chip. Stop
+    // the keydown from bubbling but leave the default action alone, so the
+    // button's native activation still fires and removes the chip.
+    remove.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.stopPropagation()
+      }
+    })
     span.append(remove)
     return span
   }
