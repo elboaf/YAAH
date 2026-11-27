@@ -49,10 +49,11 @@ jobs:
     steps:
       # Optional dispatch input to validate a specific branch/SHA without
       # cutting a release tag (e.g. a fix branch for a release-pipeline
-      # failure). Empty = the pushed branch/commit as usual.
+      # failure). Empty = checkout's default (the event commit the run was
+      # dispatched for - NOT github.ref, which would track the branch tip).
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-node@v4
         with:
