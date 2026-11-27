@@ -191,5 +191,62 @@ describe('coderabbit fix round PR #819', () => {
       )
 
     })
+
+    it('keeps the caret after text that follows a chip (foo $web bar)', async () => {
+      // #840 criterion 2: typing `foo $web bar` with the caret after `bar`
+      // must leave the caret after `bar`, not jump to the chip's start.
+      // This exercises the text-node branch of the caret-restore walk.
+      useAgent.setState({
+        conversationId: null,
+        statusByConv: {},
+        messagesByConv: {},
+        pendingQuestions: {},
+        pendingApprovals: {},
+        pendingPlanApprovals: {},
+      })
+      listSkills.mockResolvedValue({ skills: [{ name: 'web', description: '' }] })
+
+      const { container } = render(<Composer />)
+      const box = screen.getByLabelText('Message the agent') as HTMLElement
+      const editor = (box as unknown as {
+        __editor?: { update: (fn: () => void) => void; getEditorState: () => import('lexical').EditorState }
+      }).__editor
+
+      // Enter `foo $web bar` with the caret after `bar` (offset 12).
+      await act(async () => {
+        if (!editor) return
+        await editor.update(() => {
+          const root = $getRoot()
+          root.clear()
+          const para = $createParagraphNode()
+          para.append($createTextNode('foo $web bar'))
+          root.append(para)
+        })
+      })
+      fireEvent.input(box)
+
+      await waitFor(
+        () => {
+          const chip = container.querySelector('[data-skill="web"]')
+          expect(chip).toBeTruthy()
+        },
+        { timeout: 1000 },
+      )
+
+      // Caret lands after `bar` — a text point inside the trailing text node.
+      await waitFor(
+        () => {
+          if (!editor) return
+          const selection = (editor.getEditorState() as any)._selection
+          expect(selection).not.toBeNull()
+          expect(selection.anchor.type).toBe('text')
+          // "foo $web bar" = "foo " + "$web" + " bar", so the trailing
+          // text node is " bar" (4 chars) and the caret at its end sits at
+          // offset 4.
+          expect(selection.anchor.offset).toBe(4)
+        },
+        { timeout: 1000 },
+      )
+    })
   })
 })
