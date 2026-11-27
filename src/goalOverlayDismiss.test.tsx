@@ -9,8 +9,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, fireEvent, act } from '@testing-library/react'
 import { useAgent } from './store'
-import { TodoItem } from './components'
 import { ChatPanel } from './components'
+import { TodoItem } from './store'
 
 const todo = (content: string): TodoItem => ({ content, status: 'pending', priority: 'high' })
 
