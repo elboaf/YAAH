@@ -101,6 +101,17 @@ TODO_WRITE_SCHEMA = {
                     ),
                     "items": _TODO_ITEM_SCHEMA,
                 },
+                "objective": {
+                    "type": "string",
+                    "description": (
+                        "An optional tight summary of your current "
+                        "understanding of the user's intent for this run. "
+                        "Pass it when your understanding has refined since "
+                        "the run started, so the goal summary updates live "
+                        "in lockstep with the checklist. Omit it to leave "
+                        "the summary unchanged."
+                    ),
+                },
             },
             "required": ["todos"],
         },
@@ -128,25 +139,32 @@ def _normalize_item(raw: dict) -> dict | None:
     return {"content": content.strip(), "status": status, "priority": priority}
 
 
-def parse_todo_result(result: object) -> list[dict] | None:
-    """Pull the todo list out of a TodoWrite/TodoRead result.
+def parse_todo_result(result: object) -> tuple[list[dict] | None, str | None]:
+    """Pull the todo list (and optional objective) out of a result.
 
     Mirrors ycode's ``todoItemsFromToolResultContent``: accept a result that is
     either ``{"todos": [...]}`` (TodoRead output) or ``{"todos": [...],
-    "oldTodos": [...], "summary": {...}}`` (TodoWrite output). Returns the
-    normalized list, or None when the result carries no usable todos.
+    "oldTodos": [...], "summary": {...}}`` (TodoWrite output). Returns a
+    ``(items, objective)`` pair: the normalized list, or None when the result
+    carries no usable todos; and the optional `objective` summary string, or
+    None when the result carries no objective.
     """
     if not isinstance(result, dict):
-        return None
+        return None, None
     todos = result.get("todos")
     if not isinstance(todos, list):
-        return None
+        return None, None
     items: list[dict] = []
     for raw in todos:
         item = _normalize_item(raw)
         if item is not None:
             items.append(item)
-    return items
+    objective = result.get("objective")
+    if isinstance(objective, str) and objective.strip():
+        objective = objective.strip()
+    else:
+        objective = None
+    return items, objective
 
 
 def format_todo_state_for_model(todos: list[dict]) -> str:

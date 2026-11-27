@@ -1695,7 +1695,7 @@ async def _todo_write_executor(
     from backend.agent import todo as todo_mod
     from backend.db import database
 
-    items = todo_mod.parse_todo_result(arguments)
+    items, objective = todo_mod.parse_todo_result(arguments)
     if items is None:
         return {
             "error": (
@@ -1706,10 +1706,15 @@ async def _todo_write_executor(
     if conversation_id is not None:
         try:
             import json
+            # #868: an explicit objective refreshes the durable summary so the
+            # goal card shows the agent's current understanding (survives
+            # restart). Persist it alongside the checklist in the same write;
+            # a None objective leaves the existing session_goal untouched.
             await database.update_conversation(
                 conversation_id,
                 touch_updated_at=False,
                 session_todos=json.dumps(items),
+                session_goal=objective,
             )
         except Exception as e:  # #855/#856: the checklist is an anchor, not a
             # gate — a write failure must not wedge the turn — but it must also
@@ -1721,6 +1726,10 @@ async def _todo_write_executor(
             return {"error": "Could not save the goal checklist. It will not persist until this can be retried."}
     return {
         "todos": items,
+        # #868: echo the objective back so the frontend can refresh the durable
+        # summary from the accepted result (ev.result.objective). Only when the
+        # agent actually passed one — an absent objective leaves the summary.
+        "objective": objective,
         "summary": {
             "total": len(items),
             "pending": sum(1 for t in items if t["status"] == todo_mod.PENDING),

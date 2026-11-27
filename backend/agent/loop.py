@@ -2182,6 +2182,18 @@ async def _run_agent_claimed(
     except Exception:  # noqa: BLE001 — the objective is an anchor, not a gate
         log.warning("session_goal_write_failed")
 
+    # #868: after persisting this turn's root prompt, re-read the durable
+    # objective from the row. A TodoWrite earlier in THIS run (or a resumed
+    # run) may have refined session_goal; the re-injected tail (below) and the
+    # verifier must see the refined summary, not the frozen root prompt.
+    try:
+        _g = await get_conversation(conversation_id)
+        _g_raw = (_g or {}).get("session_goal")
+        if isinstance(_g_raw, str) and _g_raw.strip():
+            session_goal = _g_raw.strip()
+    except Exception:  # noqa: BLE001 — the objective is an anchor, not a gate
+        log.warning("session_goal_reread_failed")
+
     # #855: the durable todo list (the multi-goal checklist). Read the
     # conversation row's `session_todos` so the checklist survives a session
     # restart and is re-injected every turn (todo.tail_message, below). The

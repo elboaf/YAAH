@@ -2608,9 +2608,13 @@ function hydrateRemoteTodos(
     const content = row.content
     if (!content || typeof content !== 'string') continue
     try {
-      const parsed = JSON.parse(content) as { todos?: TodoItem[] }
+      const parsed = JSON.parse(content) as { todos?: TodoItem[]; objective?: string }
       if (Array.isArray(parsed?.todos)) {
         useAgent.getState().setTodos(key, parsed.todos)
+      }
+      // #868: a remote TodoWrite objective refreshes the summary too.
+      if (typeof parsed?.objective === 'string' && parsed.objective.trim()) {
+        useAgent.getState().setObjective(key, parsed.objective.trim())
       }
     } catch {
       // not a JSON result — leave it, the live TodoWrite path repopulates
@@ -12331,10 +12335,18 @@ export function Composer({
       }
       // #855: TodoWrite carries the updated checklist in its result. Keep the
       // store's todosByConv in sync so the goal card reflects it live.
+      // #868: an explicit objective refreshes the durable summary so the goal
+      // card shows the agent's current understanding in lockstep with the
+      // checklist. Persist it only when present (an absent objective leaves
+      // the existing summary intact).
       if (ev.name === 'TodoWrite' && ev.result && typeof ev.result === 'object') {
-        const todos = (ev.result as { todos?: TodoItem[] }).todos
+        const result = ev.result as { todos?: TodoItem[]; objective?: string }
+        const todos = result.todos
         if (Array.isArray(todos)) {
           useAgent.getState().setTodos(bufKey, todos)
+        }
+        if (typeof result.objective === 'string' && result.objective.trim()) {
+          useAgent.getState().setObjective(bufKey, result.objective.trim())
         }
       }
       if (ev.name === 'exit_plan') {

@@ -36,6 +36,17 @@ def test_todo_write_schema_shape():
     ]
 
 
+def test_todo_write_schema_has_optional_objective():
+    # #868: TodoWrite carries an optional `objective` so the agent can refine
+    # the durable summary mid-run. It is optional (not in `required`) and a
+    # plain string.
+    schema = tools_mod.SCHEMAS[todo.TODO_WRITE_TOOL]
+    params = schema["function"]["parameters"]
+    assert "objective" in params["properties"]
+    assert isinstance(params["properties"]["objective"]["type"], str)
+    assert "objective" not in params["required"]
+
+
 # ------------------------------------------------------- parse / normalize
 
 def test_parse_todo_result_returns_normalized_items():
@@ -46,12 +57,13 @@ def test_parse_todo_result_returns_normalized_items():
             {"content": "Write tests", "status": "pending", "priority": "low"},
         ]
     }
-    items = todo.parse_todo_result(result)
+    items, objective = todo.parse_todo_result(result)
     assert items == [
         {"content": "Fix bug A", "status": "completed", "priority": "high"},
         {"content": "Add feature B", "status": "in_progress", "priority": "medium"},
         {"content": "Write tests", "status": "pending", "priority": "low"},
     ]
+    assert objective is None
 
 
 def test_parse_todo_result_normalizes_bad_values():
@@ -61,10 +73,11 @@ def test_parse_todo_result_normalizes_bad_values():
             {"content": "  Trimmed  ", "status": "weird", "priority": "nope"},
         ]
     }
-    items = todo.parse_todo_result(result)
+    items, objective = todo.parse_todo_result(result)
     assert items == [
         {"content": "Trimmed", "status": "pending", "priority": "medium"}
     ]
+    assert objective is None
 
 
 def test_parse_todo_result_drops_unusable_items():
@@ -76,15 +89,46 @@ def test_parse_todo_result_drops_unusable_items():
             {"status": "completed", "priority": "high"},  # missing content
         ]
     }
-    items = todo.parse_todo_result(result)
+    items, objective = todo.parse_todo_result(result)
     assert items == [{"content": "good", "status": "pending", "priority": "low"}]
+    assert objective is None
 
 
 def test_parse_todo_result_none_when_no_usable_todos():
-    assert todo.parse_todo_result({}) is None
-    assert todo.parse_todo_result({"todos": "not-a-list"}) is None
-    assert todo.parse_todo_result("not-a-dict") is None
-    assert todo.parse_todo_result({"todos": []}) == []
+    assert todo.parse_todo_result({}) == (None, None)
+    assert todo.parse_todo_result({"todos": "not-a-list"}) == (None, None)
+    assert todo.parse_todo_result("not-a-dict") == (None, None)
+    assert todo.parse_todo_result({"todos": []}) == ([], None)
+
+
+def test_parse_todo_result_extracts_objective():
+    # #868: an `objective` on the result is parsed alongside the todos.
+    result = {
+        "todos": [{"content": "Fix A", "status": "pending", "priority": "low"}],
+        "objective": "Refined understanding of the run",
+    }
+    items, objective = todo.parse_todo_result(result)
+    assert items == [{"content": "Fix A", "status": "pending", "priority": "low"}]
+    assert objective == "Refined understanding of the run"
+
+
+def test_parse_todo_result_trims_and_ignores_empty_objective():
+    # #868: an empty/whitespace objective is dropped (leaves the summary intact).
+    result = {
+        "todos": [{"content": "Fix A", "status": "pending", "priority": "low"}],
+        "objective": "   ",
+    }
+    items, objective = todo.parse_todo_result(result)
+    assert items == [{"content": "Fix A", "status": "pending", "priority": "low"}]
+    assert objective is None
+
+    # A non-string objective is ignored too.
+    result = {
+        "todos": [{"content": "Fix A", "status": "pending", "priority": "low"}],
+        "objective": 42,
+    }
+    items, objective = todo.parse_todo_result(result)
+    assert objective is None
 
 
 # ------------------------------------------------------- format / tail
@@ -239,3 +283,36 @@ async def test_todo_write_executor_write_failure_returns_error():
 
     assert "error" in result
     assert "todos" not in result
+
+
+@pytest.mark.asyncio
+async def test_todo_write_executor_persists_and_echoes_objective():
+    # #868: a TodoWrite that carries an objective persists it to the durable
+    # session_goal so the summary survives restart, and echoes it back so the
+    # frontend can refresh the in-flight summary.
+    cid = await database.create_conversation("Todo write objective")
+    items = [{"content": "Fix A", "status": "pending", "priority": "high"}]
+    result = await tools_mod.EXECUTORS[todo.TODO_WRITE_TOOL](
+        workspace=".", conversation_id=cid, todos=items,
+        objective="Refined run summary",
+    )
+    assert result["objective"] == "Refined run summary"
+    row = await database.get_conversation(cid)
+    assert row["session_goal"] == "Refined run summary"
+
+
+@pytest.mark.asyncio
+async def test_todo_write_executor_no_objective_leaves_goal_untouched():
+    # #868: a TodoWrite without an objective must not clobber the existing
+    # durable objective.
+    cid = await database.create_conversation("Todo write no objective")
+    await database.update_conversation(
+        cid, touch_updated_at=False, session_goal="Original objective"
+    )
+    items = [{"content": "Fix A", "status": "completed", "priority": "high"}]
+    result = await tools_mod.EXECUTORS[todo.TODO_WRITE_TOOL](
+        workspace=".", conversation_id=cid, todos=items
+    )
+    assert result.get("objective") is None
+    row = await database.get_conversation(cid)
+    assert row["session_goal"] == "Original objective"
