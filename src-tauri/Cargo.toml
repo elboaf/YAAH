@@ -78,6 +78,15 @@ muda = { path = "vendor/muda-0.20.0" }
 tao = { path = "vendor/tao-0.37.0" }
 rfd = { path = "vendor/rfd-0.15.0" }
 tauri = { path = "vendor/tauri-2.12.4" }
+# Patch the registry glib-sys/gobject-sys (0.18.1/0.18.0) up to the
+# gtk-rs-core 0.22 branch so rfd's gtk3 feature (which requires ^0.22.11)
+# resolves to the SAME crate gtk-sys 0.19.0 depends on. Without this rfd's
+# glib_sys::GSList (0.18.1) and the chain's GSList (0.22.11) are distinct
+# types -> E0308 mismatched types at vendor/rfd-0.15.0/src/backend/gtk3/
+# file_dialog/dialog_ffi.rs:136. The tag 0.22.0 checkout is version 0.22.0,
+# which does NOT satisfy ^0.22.11, so point the patch at branch 0.22 (0.22.11).
+glib-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
+gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", branch = "0.22" }
 # Force tauri-runtime / tauri-runtime-wry to the vendored path versions
 # (which have webkit2gtk =3.0.0, gtk 0.19) everywhere, including the transitive
 # ~2.12.3 dependency from tauri-runtime-wry that would otherwise resolve to the
@@ -85,10 +94,7 @@ tauri = { path = "vendor/tauri-2.12.4" }
 tauri-runtime = { path = "vendor/tauri-runtime-2.12.3" }
 tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.12.4" }
 glib = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-glib-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
 gio = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-gio-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
-gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
 cairo-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
 cairo-sys-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
 pango = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
