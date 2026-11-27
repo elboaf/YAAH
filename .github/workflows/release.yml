@@ -410,12 +410,12 @@ jobs:
         run: |
           set -euo pipefail
           GRADLE_HOME="$RUNNER_TEMP/gradle-$GRADLE_VERSION"
-          if [ ! -x "$GRADLE_HOME/$GRADLE_VERSION/bin/gradle" ]; then
+          if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
             curl -fsSL --retry 3 -o "$RUNNER_TEMP/gradle.zip" \
               "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
             unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
           fi
-          echo "$GRADLE_HOME/$GRADLE_VERSION/bin" >> "$GITHUB_PATH"
+          echo "$GRADLE_HOME/bin" >> "$GITHUB_PATH"
           gradle --version | sed -n '1,4p'
 
       - name: Set up Android SDK
