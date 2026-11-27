@@ -21,7 +21,17 @@ tauri-build = { version = "2.6.3", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.12.4", features = [] }
+# Vendored tauri 2.12.4 (gtk ^0.18 -> 0.19, webkit2gtk ^2 -> =3.0.0) so the
+# whole chain resolves to webkit2gtk 3.0.0 / gtk-sys 0.19 / glib 0.22, which is
+# what the gtk-rs chain patch (gtk-rs-core 0.22.0) requires. See vendor/ notes.
+tauri = { path = "vendor/tauri-2.12.4", features = [] }
+# Force exact transitive versions so the vendored webkit2gtk 3.0.0 patch is
+# selected deterministically (fresh resolves otherwise pick max versions and
+# leave the patch "not used"). See vendor/ notes.
+tauri-runtime = { path = "vendor/tauri-runtime-2.12.3" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.12.4" }
+wry = { path = "vendor/wry-0.57.2" }
+muda = { path = "vendor/muda-0.20.0" }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 # Hyperlinks open in the OS default browser (#31): the webview swallows
@@ -31,8 +41,14 @@ tauri-plugin-global-shortcut = "2"
 ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# must stay version-compatible with the webkit2gtk tauri/wry pull in (~2.x)
-webkit2gtk = { version = "2", features = ["v2_4"] }
+# Match the vendored wry's webkit2gtk 3.0.0 so there is a single web_kit2
+# native lib (the vendored wry pins =3.0.0; the old "2" pulled 2.0.0 and
+# collided on the links value). See vendor/ notes.
+webkit2gtk = { version = "=3.0.0", features = ["v2_40"] }
+# libappindicator 0.10.0 requires gtk ^0.19 (matches the patched gtk-rs
+# 0.19.0); 0.9.0 requires gtk ^0.18 and conflicts with gtk-sys 0.19.0. Force
+# 0.10.0 so there is a single gtk-3 native lib. See vendor/ notes.
+libappindicator = "=0.10.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -40,3 +56,50 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 # open_external (#59): ShellExecuteW without going through cmd.exe.
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_Foundation"] }
+
+# glib 0.22.0 via coordinated patch (RUSTSEC-2024-0429, Dependabot alert #5).
+# glib 0.18.5 has unsound VariantStrIter impls (NULL deref); fixed in glib 0.20.0+.
+# The fix requires a coordinated version bump across the whole gtk-rs + webkit2gtk
+# chain. glib 0.22.0 lives in gtk-rs-core 0.22.0 (requires glib ^0.22); gtk-rs
+# 0.19.0 requires glib ^0.22; webkit2gtk 3.0.0 requires glib ^0.22 + gtk-sys ^0.19.
+#
+# wry 0.57.3 (published + dev + main) hard-pins webkit2gtk =2.0.2, which requires
+# glib ^0.18. No published or branch version of wry/tauri uses webkit2gtk 3.x, so
+# wry + tauri-runtime-wry + tauri-runtime are vendored under vendor/ with their
+# webkit2gtk pins bumped to =3.0.0, then re-pulled here via [patch.crates-io] path
+# overrides. The gtk-rs chain patch below (gtk-rs-core 0.22.0, gtk-rs 0.19.0) is
+# exactly what webkit2gtk 3.0.0 requires.
+# libappindicator 0.10.0 (gtk ^0.19) replaces 0.9.0 (gtk ^0.18).
+# The same glib-2.0/gio-2.0/gobject-2.0 native libs are linked — no new system deps.
+[patch.crates-io]
+wry = { path = "vendor/wry-0.57.2" }
+tray-icon = { path = "vendor/tray-icon-0.25.0" }
+muda = { path = "vendor/muda-0.20.0" }
+tao = { path = "vendor/tao-0.37.0" }
+rfd = { path = "vendor/rfd-0.15.0" }
+tauri = { path = "vendor/tauri-2.12.4" }
+# Force tauri-runtime / tauri-runtime-wry to the vendored path versions
+# (which have webkit2gtk =3.0.0, gtk 0.19) everywhere, including the transitive
+# ~2.12.3 dependency from tauri-runtime-wry that would otherwise resolve to the
+# registry versions with webkit2gtk =2.0.
+tauri-runtime = { path = "vendor/tauri-runtime-2.12.3" }
+tauri-runtime-wry = { path = "vendor/tauri-runtime-wry-2.12.4" }
+glib = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+glib-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gio = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gio-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gobject-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+cairo-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+cairo-sys-rs = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pango = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pango-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pangocairo = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+pangocairo-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gdk-pixbuf = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+gdk-pixbuf-sys = { git = "https://github.com/gtk-rs/gtk-rs-core", tag = "0.22.0" }
+atk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+atk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gdk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gdk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gtk = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
+gtk-sys = { git = "https://github.com/gtk-rs/gtk-rs", tag = "0.19.0" }
