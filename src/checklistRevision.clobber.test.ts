@@ -23,7 +23,7 @@ import type { TodoItem } from './store'
 const key = 'conv-867'
 
 const todo = (id: string, title: string, status: 'in_progress' | 'done' | 'pending'): TodoItem =>
-  ({ id, title, status, description: '' } as TodoItem)
+  ({ id, title, status, description: '' } as unknown as TodoItem)
 
 // Simulate the conversation-row seed that components.tsx runs after
 // getConversation() resolves. Mirrors the #867 guard: only seed when no live
