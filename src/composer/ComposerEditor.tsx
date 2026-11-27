@@ -38,6 +38,97 @@ export interface ComposerEditorProps {
   knownSkills?: Set<string>
 }
 
+/** Character offset of a point in the serialized-text coordinate space
+ *  (the same space `serializeEditorState` produces). Used to carry the caret
+ *  across the value-sync rebuild.
+ */
+function charOffsetForPoint(
+  point: { key: string; offset: number; type: 'text' | 'element'; getNode: () => any },
+): number {
+  if (point.type === 'text') {
+    const node = point.getNode()
+    const parent = node.getParent()
+    if (!parent) return 0
+    let offset = 0
+    let child = parent.getFirstChild()
+    while (child) {
+      if (child.getKey() === node.getKey()) {
+        return offset + point.offset
+      }
+      offset += child.getTextContent().length
+      child = child.getNextSibling()
+    }
+    return 0
+  }
+  // Element point: character offset = total text of children before the point
+  // (element points sit BETWEEN children, not inside one).
+  const parent = point.getNode()
+  let offset = 0
+  let child = parent.getFirstChild()
+  let index = 0
+  while (child) {
+    if (index >= point.offset) break
+    offset += child.getTextContent().length
+    index++
+    child = child.getNextSibling()
+  }
+  return offset
+}
+
+/** Restore a caret at the recorded character offset inside a freshly
+ *  rebuilt paragraph. Walks the children in document order, tracking the
+ *  character offset, and lands the caret in the leaf whose range contains
+ *  it. Text points are created only for actual TextNodes (a chip/element
+ *  node cannot host a text point); inline elements are restored as element
+ *  points at the sibling boundary.
+ */
+function restoreCaret(
+  paragraph: any,
+  caretChar: number,
+): void {
+  let offset = 0
+  let child = paragraph.getFirstChild()
+  let index = 0
+  while (child) {
+    const size = child.getTextContent().length
+    if (offset + size >= caretChar) {
+      const local = caretChar - offset
+      if ($isTextNode(child)) {
+        const sel = $createRangeSelection()
+        sel.anchor = $createPoint(child.getKey(), local, 'text')
+        sel.focus = $createPoint(child.getKey(), local, 'text')
+        $setSelection(sel)
+        return
+      }
+      // Inline element (e.g. chip): restore as an element point at the
+      // sibling boundary (after this element).
+      const sel = $createRangeSelection()
+      sel.anchor = $createPoint(paragraph.getKey(), index + 1, 'element')
+      sel.focus = $createPoint(paragraph.getKey(), index + 1, 'element')
+      $setSelection(sel)
+      return
+    }
+    offset += size
+    index++
+    child = child.getNextSibling()
+  }
+  // Caret is past the end of the content: restore at the very end.
+  const last = paragraph.getLastChild()
+  if (last && $isTextNode(last)) {
+    const local = last.getTextContent().length
+    const sel = $createRangeSelection()
+    sel.anchor = $createPoint(last.getKey(), local, 'text')
+    sel.focus = $createPoint(last.getKey(), local, 'text')
+    $setSelection(sel)
+    return
+  }
+  const sel = $createRangeSelection()
+  const selIdx = last ? index : 0
+  sel.anchor = $createPoint(paragraph.getKey(), selIdx, 'element')
+  sel.focus = $createPoint(paragraph.getKey(), selIdx, 'element')
+  $setSelection(sel)
+}
+
 /** Internal child that wires up value sync and change serialization. */
 const ComposerInner = ({
   value,
@@ -106,16 +197,20 @@ const ComposerInner = ({
     if (current === value && !hasUnchippedToken) return
     syncingRef.current = true
     editor.update(() => {
-      // Preserve the caret across the rebuild: `root.clear()` drops the
-      // paragraph that holds the insertion point, so the caret would jump to
-      // the start and later input would land after the wrong token. Record the
-      // offset before clearing and restore it after appending the new content.
+      // Preserve the caret across the rebuild. `root.clear()` drops the
+      // paragraph holding the insertion point, so the caret would jump to
+      // the start and later input would land after the wrong token.
+      //
+      // The caret is recorded as a CHARACTER OFFSET in the serialized text
+      // (the same coordinate space `serializeEditorState` produces), not a
+      // local offset within a leaf. This is the one space the rebuild can
+      // reproduce exactly: a token that becomes a chip changes leaf shape
+      // but not its serialized length, so the character offset survives the
+      // rebuild byte-identically.
       const selection = $getSelection()
-      let caretOffset = 0
+      let caretChar = current.length
       if ($isRangeSelection(selection) && selection.focus) {
-        caretOffset = selection.focus.offset
-      } else {
-        caretOffset = current.length
+        caretChar = charOffsetForPoint(selection.focus)
       }
       const root = $getRoot()
       root.clear()
@@ -142,46 +237,12 @@ const ComposerInner = ({
       }
       root.append(paragraph)
 
-      // Restore the caret at the recorded text offset. Chips are atomic inline
-      // nodes with no text children, so a text-side Point cannot live inside
-      // one — applying such a Point throws (`selectionTransform is not a
-      // function`). Walk the rebuilt children and place the caret on the node
-      // that actually holds the offset: inside a text node by text offset, or
-      // on the paragraph at the child boundary after a chip, so later input
-      // lands after the token rather than inside the chip.
-      const children = paragraph.getChildren()
-      let offset = 0
-      let caretSet = false
-      for (let i = 0; i < children.length; i++) {
-        const child = children[i]
-        const childTextLen = $isTextNode(child)
-          ? child.getTextContent().length
-          : child instanceof SkillChipNode
-            ? child.getSerializedToken().length
-            : 0
-        if (offset + childTextLen >= caretOffset) {
-          const sel = $createRangeSelection()
-          if ($isTextNode(child)) {
-            sel.anchor = $createPoint(child.getKey(), caretOffset - offset, 'text')
-            sel.focus = sel.anchor
-          } else {
-            // Atomic chip: caret goes after it, anchored on the parent.
-            sel.anchor = $createPoint(paragraph.getKey(), i + 1, 'element')
-            sel.focus = sel.anchor
-          }
-          $setSelection(sel)
-          caretSet = true
-          break
-        }
-        offset += childTextLen
-      }
-      if (!caretSet) {
-        // Caret is past all content: place it at the end of the paragraph.
-        const sel = $createRangeSelection()
-        sel.anchor = $createPoint(paragraph.getKey(), children.length, 'element')
-        sel.focus = sel.anchor
-        $setSelection(sel)
-      }
+      // Restore the caret at the recorded character offset. Walk the rebuilt
+      // paragraph's children in document order, tracking the character offset,
+      // and land the caret in the leaf whose range contains it. Text points
+      // are created only for actual TextNodes; element points beside chips
+      // are created with type 'element' at the sibling boundary.
+      restoreCaret(paragraph, caretChar)
     })
     syncingRef.current = false
   }, [value, editor, knownSkills, syncingRef])
