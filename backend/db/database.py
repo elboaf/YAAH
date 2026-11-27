@@ -356,6 +356,18 @@ async def get_db() -> aiosqlite.Connection:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_tokens INTEGER")
     if "context_model" not in conv_cols:
         await db.execute("ALTER TABLE conversations ADD COLUMN context_model TEXT")
+    if "compaction_summary" not in conv_cols:
+        # #852 follow-up (#883): the fold summary of the older (watermarked)
+        # turns, stored on the conversation so it survives restart and is
+        # injected into replay. NULL = no compaction has run.
+        await db.execute("ALTER TABLE conversations ADD COLUMN compaction_summary TEXT")
+    if "compaction_watermark" not in conv_cols:
+        # #852 follow-up (#883): the message id at which the fold begins.
+        # Replay skips rows with id <= this and injects compaction_summary in
+        # their place. NULL = no compaction has run.
+        await db.execute(
+            "ALTER TABLE conversations ADD COLUMN compaction_watermark INTEGER"
+        )
     if "cost_spent" not in conv_cols:
         # Per-session cumulative billed cost (issue #627). NULL = never
         # tracked / unknown provider. OpenRouter reports exact billed
@@ -1098,6 +1110,8 @@ async def update_conversation(conversation_id: int, *, touch_updated_at: bool = 
         "persisted_skill_tail_ws",
         "session_goal",
         "session_todos",
+        "compaction_summary",
+        "compaction_watermark",
         "model",
         "effort",
         "subagent_model",
