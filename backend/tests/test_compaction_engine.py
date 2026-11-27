@@ -8,6 +8,8 @@ seam, not the internals. The DB is the conftest throwaway (isolated per run);
 each test uses its own autoincremented conversation id, so there is no
 cross-test contamination.
 """
+import asyncio
+
 import pytest
 
 from backend.agent import compaction as _policy
@@ -24,6 +26,22 @@ from backend.db.database import (
 
 def _row(mid, role, content):
     return {"id": mid, "conversation_id": 1, "role": role, "content": content}
+
+
+async def _ensure_watermark_column():
+    """Guard against a stale read: under CI's -n 2 (shared agent.db) a second
+    process's first connection can SELECT * FROM conversations before the
+    compaction_watermark column migration has landed. Wait for it so the test
+    never reads a row snapshot taken before the column existed.
+    """
+    from backend.db import database as dbmod
+
+    for _ in range(20):
+        cols = await dbmod._conversation_columns()
+        if "compaction_watermark" in cols:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("compaction_watermark column never appeared")
 
 
 # ------------------------------------------------------------------ rounds

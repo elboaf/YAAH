@@ -1051,6 +1051,15 @@ async def _get_conversation_row(conversation_id: int) -> dict | None:
         return result
 
 
+async def _conversation_columns() -> set[str]:
+    """The current set of conversation columns (one PRAGMA). Lets callers
+    confirm a freshly-added column has landed for this process's connection,
+    avoiding a stale SELECT * snapshot under concurrent shared-DB access."""
+    async with open_db() as db:
+        cur = await db.execute("PRAGMA table_info(conversations)")
+        return {r[1] for r in await cur.fetchall()}
+
+
 async def delete_conversation(conversation_id: int) -> bool:
     """Delete a conversation and all its messages (FK cascade)."""
     async with open_db() as db:
