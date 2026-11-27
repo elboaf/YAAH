@@ -432,12 +432,13 @@ jobs:
           unzip -q tools.zip
           mv cmdline-tools latest
           # platform-34 for compileSdk/targetSdk 34, build-tools 34.0.0 for AGP 8.1,
-          # platform-tools for adb. --accept-licenses avoids the interactive prompt.
-          # Feed yes via process substitution so its SIGPIPE (when sdkmanager
-          # closes its input) cannot fail the pipeline under pipefail; only
-          # sdkmanager's real exit status fails the job.
+          # platform-tools for adb. --console accepts licenses non-interactively
+          # (this sdkmanager build rejects --accept-licenses). Feed yes via process
+          # substitution so its SIGPIPE (when sdkmanager closes its input) cannot
+          # fail the pipeline under pipefail; only sdkmanager's real exit status
+          # fails the job.
           "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
-            --accept-licenses --announce-license \
+            --console \
             "platform-tools" "platforms;android-34" "build-tools;34.0.0" < <(yes)
 
       - name: Point local.properties at the Linux SDK
