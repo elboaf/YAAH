@@ -1465,6 +1465,86 @@ export function ObjectiveCard({ objective, iteration, todos }: {
   )
 }
 
+/** Floating goal checklist overlay (the ycode/zcode multi-goal card).
+ *
+ * The inline `ObjectiveCard` renders in the transcript, but the multi-goal
+ * checklist is meant to hover ABOVE the composer as a persistent, dismissable
+ * card that crosses items off as the run progresses. This is that overlay:
+ * it reads the same live `todos` from the store the inline card does, so it
+ * stays in sync with every `TodoWrite` without its own state. It renders only
+ * when a checklist exists (the inline card already shows the objective with no
+ * checklist), and the user can dismiss it with the ×.
+ */
+export function GoalOverlay({
+  objective,
+  iteration,
+  todos,
+  onClose,
+}: {
+  objective: string
+  iteration: number
+  todos: TodoItem[]
+  onClose: () => void
+}) {
+  const completedCount = todos.filter((t) => t.status === 'completed').length
+  return (
+    <div
+      className="fixed right-5 bottom-28 z-[60] w-[min(340px,90vw)] rounded-lg border border-zinc-800/50 bg-zinc-900/95 shadow-2xl flex flex-col max-h-[calc(100vh-7rem)] overflow-hidden"
+      role="status"
+      aria-label="Goal checklist"
+    >
+      <div className="flex shrink-0 items-center justify-between border-b border-zinc-800/50 px-3 py-2">
+        <div className="flex shrink-0 items-center gap-2 overflow-hidden">
+          <span aria-hidden="true" className="lg-caret">◆</span>
+          <span className="lg-title">goal</span>
+          {iteration > 1 && (
+            <span className="lg-sub text-sky-300/90">iteration {iteration}</span>
+          )}
+          {todos.length > 0 && (
+            <span className="lg-sub">{completedCount}/{todos.length} done</span>
+          )}
+        </div>
+        <button
+          onClick={onClose}
+          aria-label="Dismiss goal checklist"
+          title="Dismiss"
+          className="text-zinc-600 hover:text-zinc-300"
+        >
+          ×
+        </button>
+      </div>
+      <div className="shrink-0 px-3 py-2 text-xs leading-snug text-zinc-200 overflow-x-auto whitespace-pre-wrap break-words">{objective}</div>
+      <ul className="shrink-0 flex-1 space-y-0.5 overflow-y-auto px-3 pb-3 pt-1">
+        {todos.map((t, i) => (
+          <li key={i} className="flex items-start gap-2 text-[11px] leading-snug">
+            <span
+              aria-hidden="true"
+              className={`mt-0.5 shrink-0 ${
+                t.status === 'completed' ? 'text-green-400'
+                  : t.status === 'in_progress' ? 'text-sky-300/90'
+                    : 'text-zinc-600'
+              }`}
+            >
+              {t.status === 'completed' ? '✓' : t.status === 'in_progress' ? '→' : '·'}
+            </span>
+            <span
+              className={`min-w-0 break-words ${
+                t.status === 'completed'
+                  ? 'text-zinc-500 line-through'
+                  : t.status === 'in_progress'
+                    ? 'text-sky-300/90'
+                    : 'text-zinc-300'
+              }`}
+            >
+              {t.content}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 /** Issue #279: memoized — a streaming delta only ever mutates ONE message
  *  object in the store (appendTextDelta clones just the touched message), so
  *  untouched rows keep reference identity and memo skips their re-render.
@@ -10742,6 +10822,10 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
   const todos = useAgent(
     (s) => s.todosByConv[s.conversationId === null ? 'draft' : String(s.conversationId)],
   )
+  // Floating goal-checklist overlay is dismissable; it only shows once a
+  // checklist exists (the inline ObjectiveCard covers the objective with no
+  // checklist).
+  const [showGoalOverlay, setShowGoalOverlay] = useState(false)
   const error = useError()
   const pendingQuestion = useAgent((s) => {
     const key = s.bufferKey()
@@ -11054,6 +11138,39 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
       }
     }
   }, [pendingQuestion, ttsEnabled, ttsReady, speakQuestion])
+  // #855: show the floating checklist overlay as soon as the agent creates a
+  // checklist (ycode/zcode behaviour) — no user action needed. Open it when
+  // the FIRST checklist for a conversation arrives, so a conversation that
+  // starts with no todos (or an initial draft with both IDs null) still opens
+  // the moment the first TodoWrite or session hydration supplies a checklist.
+  // A later TodoWrite that replaces `todos` does not reopen an overlay the
+  // user already dismissed. The live `todos` are still passed through, so the
+  // overlay stays in sync while it is open.
+  const openedForConvRef = useRef<number | null>(null)
+  const dismissedRef = useRef(false)
+  // Track dismissal in sync with the real overlay visibility: true when the
+  // overlay is hidden, so a later checklist replacement can tell whether the
+  // user already dismissed.
+  useEffect(() => {
+    dismissedRef.current = !showGoalOverlay
+  }, [showGoalOverlay])
+  useEffect(() => {
+    const key = conversationId ?? null
+    const hasChecklist = todos != null && todos.length > 0
+    if (openedForConvRef.current !== key) {
+      // Conversation changed (or first run): reset tracking and open if a
+      // checklist is already present.
+      openedForConvRef.current = key
+      dismissedRef.current = false
+      if (hasChecklist) setShowGoalOverlay(true)
+      return
+    }
+    // Same conversation as when we opened. Reopen on a checklist replacement
+    // only if the user has not dismissed it; otherwise leave it dismissed.
+    if (hasChecklist && !dismissedRef.current) {
+      setShowGoalOverlay(true)
+    }
+  }, [todos, conversationId])
   // Persist the toggle; the backend merges it into voice.tts_enabled.
   const toggleTts = () => {
     const next = !ttsEnabled
@@ -11180,6 +11297,17 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           </div>
         )}
       </div>
+      {/* #855: floating multi-goal checklist overlay. Renders once a
+          checklist exists (the inline ObjectiveCard covers the objective with
+          no checklist). Dismissable; the live store keeps it in sync. */}
+      {showGoalOverlay && todos && todos.length > 0 && (
+        <GoalOverlay
+          objective={objectiveText}
+          iteration={goalIterationCount(messages)}
+          todos={todos}
+          onClose={() => setShowGoalOverlay(false)}
+        />
+      )}
       {error && (
         <div className="  border-red-900 bg-red-950/60 px-4 py-2 text-xs text-red-300">
           {error}
@@ -11250,6 +11378,20 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
             )}
           </>
         }
+        goalButton={
+          todos && todos.length > 0 && (
+            <button
+              onClick={() => setShowGoalOverlay((o) => !o)}
+              title="Show goal checklist"
+              aria-label="Show goal checklist"
+              className={`ml-2 rounded px-1.5 py-0.5 text-[10px] font-mono ${
+                showGoalOverlay ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              goal · {todos.filter((t) => t.status === 'completed').length}/{todos.length}
+            </button>
+          )
+        }
       />
       {/* The app-floor strip keeps ONE job: the machine-state dot (amber
           working / red error / emerald idle) and its label. Context, git,
@@ -11290,9 +11432,12 @@ const MAX_TEXT_BYTES = 2_000_000
  *  TOP edge, right-aligned. */
 export function Composer({
   rightSlot,
+  goalButton,
 }: {
   /** Session meta, top edge, right-aligned. */
   rightSlot?: ReactNode
+  /** Optional goal-checklist toggle button, rendered in the composer meta row. */
+  goalButton?: ReactNode
 } = {}) {
   const {
     conversationId,
@@ -12971,13 +13116,14 @@ export function Composer({
       )}
       <div className="imp-composer-meta">
         <span className="imp-composer-meta__right">{rightSlot}</span>
+        {goalButton}
       </div>
       <div
         data-composer=""
         className={`imp-composer rounded-lg border bg-zinc-800/50 transition-colors ${
           dragOver
             ? 'border-blue-500 border-dashed'
-            : ' border-zinc-800/40 focus-within:border-blue-500'
+            : ' border-zinc-800/50 focus-within:border-blue-500'
         }`}
       >
         {images.length > 0 && (

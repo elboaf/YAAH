@@ -70,7 +70,13 @@ describe('composer: skill chip renders from in-editor text', () => {
       () => {
         const chip = container.querySelector('[data-skill="ask-matt"]')
         expect(chip).toBeTruthy()
-        expect(chip?.textContent).toBe('$ask-matt')
+        // The label carries the serialized token; the remove × is a separate
+        // affordance, so assert on the label, not the whole chip.
+        const label = chip?.querySelector('.skill-chip__label') as HTMLElement | null
+        expect(label?.textContent).toBe('$ask-matt')
+        // The pill is removable: a remove affordance is rendered.
+        const remove = chip?.querySelector('.skill-chip__remove') as HTMLElement | null
+        expect(remove).toBeTruthy()
       },
       { timeout: 1000 },
     )
