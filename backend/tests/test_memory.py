@@ -128,6 +128,22 @@ def test_index_for_prompt_caps_long_index():
     assert "…[truncated]" in block
 
 
+def test_index_for_prompt_wrapper_matches_returned_block_boundary(monkeypatch):
+    # #855 (CodeRabbit PR #833): the wrapper length used to decide whether to
+    # trim must match the wrapper actually rendered in the returned block, or
+    # the final block can exceed MAX_INDEX_CHARS by one character at the
+    # boundary. The wrapper uses `\n\nMaintain` (two newlines), so the length
+    # accounting must use the same `\n\nMaintain`.
+    for i in range(400):
+        memory.save_memory(WS, f"m-{i}", f"M{i}", "x" * 200, "project", "c")
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 5000)
+    block = memory.index_for_prompt(WS)
+    # The returned block uses the double-newline wrapper footer.
+    assert "\n\nMaintain this memory with the memory_save" in block
+    # And the cap holds exactly — no off-by-one over MAX_INDEX_CHARS.
+    assert len(block) <= memory.MAX_INDEX_CHARS
+
+
 def test_index_for_prompt_never_raises_on_corrupt_index(tmp_path):
     d = memory.ensure_dir(WS)
     (d / "MEMORY.md").write_bytes(b"\xff\xfe\x00broken")
