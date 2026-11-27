@@ -31,6 +31,8 @@ from backend.agent import model_client
 from backend.agent import slotcache
 from backend.agent import extract as extract_mod
 from backend.agent import verify
+from backend.agent import compaction as _compaction_mod
+from backend.agent import compaction_engine as _compaction_engine
 
 from backend.agent import file_changes
 from backend.agent import goal as goal_mod
@@ -72,6 +74,22 @@ log = logging.getLogger("yaah.loop")
 # (#341/#345) - the scheduler's precedent: an unreferenced create_task can
 # be garbage-collected mid-run.
 _extract_tasks: set[asyncio.Task] = set()
+
+# #852 follow-up (#883): one compaction circuit breaker per conversation. The
+# breaker opens after a few consecutive failed summary calls so a broken
+# summarizer stops looping forever; a single success closes it again.
+_compaction_breakers: dict[int, _compaction_mod.CircuitBreaker] = {}
+# #884: the measured prompt size from each conversation's last *successful*
+# fold, so the engine's monotonic gate compares the next turn's measurement
+# against the fold it should supersede — not against the current turn's own
+# size (which would block the fold every turn).
+_compaction_last_fold_tokens: dict[int, int] = {}
+
+
+def _compaction_breaker_for(conversation_id: int) -> _compaction_mod.CircuitBreaker:
+    return _compaction_breakers.setdefault(
+        conversation_id, _compaction_mod.CircuitBreaker()
+    )
 
 
 def _extract_done(task: asyncio.Task) -> None:
@@ -1936,9 +1954,38 @@ def _replay_rows(
 
 
 async def load_history(conversation_id: int) -> list:
-    """Load the full conversation transcript for replay."""
+    """Load the full conversation transcript for replay.
+
+    Applies #852 fold: rows at or before the conversation's compaction
+    watermark are dropped from replay and replaced by the stored fold summary
+    (injected as the oldest message). The message rows themselves are never
+    edited — review/export/search still read the originals.
+    """
     rows = await get_messages(conversation_id)
-    return _prune_old_images(_replay_rows(rows))
+    watermark = None
+    summary = None
+    try:
+        conv = await get_conversation(conversation_id) or {}
+        watermark = conv.get("compaction_watermark")
+        summary = conv.get("compaction_summary")
+    except Exception:  # noqa: BLE001 - compaction replay must not break replay
+        log.warning("compaction_replay_read_failed")
+    if watermark:
+        # Drop the folded rows (id <= watermark) before replaying, so the
+        # replayed history carries only the recent verbatim rounds.
+        rows = [r for r in rows if r.get("id") is None or r["id"] > watermark]
+    replayed = _prune_old_images(_replay_rows(rows))
+    if summary:
+        # Inject the fold summary as the oldest message of the replayed
+        # history, so the model sees it first (most distant context).
+        replayed.insert(
+            0,
+            {
+                "role": "user",
+                "content": f"<compacted_history>\n{summary.strip()}\n</compacted_history>",
+            },
+        )
+    return replayed
 
 
 # Providers cap vision inputs (and price every one of them): a long
@@ -2354,7 +2401,59 @@ async def _run_agent_claimed(
     cancel_ev = asyncio.Event()
     _cancel_events[conversation_id] = cancel_ev
 
-
+    # #852 follow-up (#883): pre-call compaction pass. At turn start, read the
+    # DB-stored measured prompt size (usage.prompt_tokens of the PREVIOUS
+    # turn's model call, persisted via set_conversation_usage), resolve the
+    # model's effective context window, and decide via the compaction policy
+    # whether the conversation has grown past the fold trigger. When it fires,
+    # summarize the older rounds into a bounded handoff, apply the summary +
+    # watermark on the conversation row (immutable: message rows are never
+    # edited), and reset context_tokens so the next call re-measures. The
+    # summary + watermark are then picked up by load_history (below) on this
+    # turn's replay. Best-effort by contract: a broken summarizer is recorded
+    # on the per-conversation circuit breaker and the turn proceeds with the
+    # full history, never raising.
+    _compaction_cfg = dict(load_config())
+    _compaction_model = (
+        model_override or (conv or {}).get("model") or _compaction_cfg.get("model") or ""
+    )
+    # #884: the measured prompt size from the conversation's last *successful*
+    # fold, so the engine's monotonic gate compares the next turn's measurement
+    # against the fold it should supersede — not against the current turn's own
+    # size (which would block the fold every turn). Seed from the stored value
+    # so a restart still has a baseline; reset after a successful fold.
+    _compaction_last_tokens = _compaction_last_fold_tokens.get(conversation_id)
+    if _compaction_last_tokens is None:
+        _compaction_last_tokens = (conv or {}).get("context_tokens")
+    _compaction_events: list[str] = []
+    _compaction_raw_rows = (
+        await get_messages(conversation_id) if include_history else []
+    )
+    try:
+        _compaction_fold_summary, _compaction_fold_watermark = (
+            await _compaction_engine.run_compaction(
+                conversation_id,
+                model_client,
+                _compaction_cfg,
+                _compaction_model,
+                rows=_compaction_raw_rows,
+                policy=_compaction_mod.CompactionPolicy.defaults(),
+                circuit_breaker=_compaction_breaker_for(conversation_id),
+                last_compacted_tokens=_compaction_last_tokens,
+                cancel_ev=cancel_ev,
+                emit_status=lambda event: _compaction_events.append(
+                    _ndjson(event)
+                ),
+            )
+        )
+        # #884: a fold happened — record the size that was folded so the next
+        # turn's gate has the right baseline.
+        if _compaction_fold_summary is not None and _compaction_fold_watermark is not None:
+            _compaction_last_fold_tokens[conversation_id] = _compaction_last_tokens
+        for _ce in _compaction_events:
+            yield _ce
+    except Exception as e:  # noqa: BLE001 - compaction must not break the turn
+        log.warning("compaction_pass_failed: %s", e)
 
     history = (
         await load_history(conversation_id) if include_history else []
