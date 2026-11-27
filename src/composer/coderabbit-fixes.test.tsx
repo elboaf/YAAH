@@ -191,5 +191,89 @@ describe('coderabbit fix round PR #819', () => {
       )
 
     })
+
+    it('keeps the caret after text that follows a chip (foo $web bar)', async () => {
+      // #840 criterion 2: typing `foo $web bar` with the caret after `bar`
+      // must leave the caret after `bar`, not jump to the chip's start.
+      // This exercises the text-node branch of the caret-restore walk.
+      useAgent.setState({
+        conversationId: null,
+        statusByConv: {},
+        messagesByConv: {},
+        pendingQuestions: {},
+        pendingApprovals: {},
+        pendingPlanApprovals: {},
+      })
+      listSkills.mockResolvedValue({ skills: [{ name: 'web', description: '' }] })
+
+      const { container } = render(<Composer />)
+      const box = screen.getByLabelText('Message the agent') as HTMLElement
+      const editor = (box as unknown as {
+        __editor?: { update: (fn: () => void) => void; getEditorState: () => import('lexical').EditorState }
+      }).__editor
+
+      // Enter `foo $web bar` with the caret after `bar` (offset 12).
+      await act(async () => {
+        if (!editor) return
+        await editor.update(() => {
+          const root = $getRoot()
+          root.clear()
+          const para = $createParagraphNode()
+          para.append($createTextNode('foo $web bar'))
+          root.append(para)
+        })
+      })
+      fireEvent.input(box)
+
+      await waitFor(
+        () => {
+          const chip = container.querySelector('[data-skill="web"]')
+          expect(chip).toBeTruthy()
+        },
+        { timeout: 1000 },
+      )
+
+      // Caret lands after `bar` — a collapsed text point on the trailing
+      // " bar" text node (not on the chip, not elsewhere in the paragraph).
+      await waitFor(
+        () => {
+          if (!editor) return
+          const selection = (editor.getEditorState() as any)._selection
+          const state = editor.getEditorState()
+          expect(selection).not.toBeNull()
+          // The caret is a text point (not an element point on the chip).
+          expect(selection.anchor.type).toBe('text')
+          // "foo $web bar" = "foo " + "$web" + " bar", so the trailing
+          // text node is " bar" (4 chars) and the caret at its end sits at
+          // offset 4.
+          expect(selection.anchor.offset).toBe(4)
+          // The anchor lives on the trailing " bar" text node: find that
+          // node in the current node map and confirm the anchor key matches
+          // it, so the assertion pins the caret to the right node, not just
+          // to a text point at offset 4 somewhere.
+          const nodeMap = state._nodeMap as Map<string, any>
+          const root = nodeMap.get('root') as any
+          const paraKey = root.__first
+          const para = nodeMap.get(paraKey) as any
+          const trailingKey = para.__first
+          let cur = trailingKey
+          let trailing: any = nodeMap.get(cur)
+          // Walk to the last child of the paragraph.
+          while (cur) {
+            trailing = nodeMap.get(cur)
+            cur = trailing.__next
+          }
+          expect(trailing.__type).toBe('text')
+          // Raw field read avoids the editor.read() requirement of
+          // getTextContent().
+          expect(trailing.__text).toBe(' bar')
+          expect(selection.anchor.key).toBe(trailing.__key)
+          // The caret is collapsed (no active range): focus sits on the same
+          // node as the anchor.
+          expect(selection.focus.key).toBe(selection.anchor.key)
+        },
+        { timeout: 1000 },
+      )
+    })
   })
 })

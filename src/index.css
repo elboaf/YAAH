@@ -580,6 +580,29 @@ button.lg-row--else { border-top: 1px dashed rgba(51, 51, 51, 0.8); }
    only the status dot. The access-mode trigger collapses to its dot alone
    (the menu is the label). Picker labels scroll (mono marquee) only when
    they overflow their clipped width. */
+/* Composer skill chips (#711): real inline SkillChipNodes that serialize to
+   `$name` tokens. They were rendering as bare `$name` text with no styling
+   (no `.skill-chip` rule existed), so a chip looked like plain text. This
+   gives the chip a legible pill, monospace to match the composer, a subtle
+   indigo fill, and a hover affordance. The span is contenteditable=false, so
+   the browser keeps it atomic (one backspace removes the whole chip). */
+.skill-chip {
+  display: inline-block;
+  vertical-align: baseline;
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace);
+  font-size: 0.8125rem;
+  line-height: 1.2;
+  color: #c4b5fd; /* violet-300 */
+  background-color: rgba(139, 92, 246, 0.16); /* violet-500 @16% */
+  border: 1px solid rgba(139, 92, 246, 0.4);
+  border-radius: 5px;
+  padding: 0 6px;
+  margin: 0 1px;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+}
+
 .imp-composer-wrap { min-width: 0; }
 .imp-composer-meta {
   display: flex;
