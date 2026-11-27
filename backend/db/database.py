@@ -412,7 +412,7 @@ async def get_db() -> aiosqlite.Connection:
             await db.execute(
                 "ALTER TABLE conversations ADD COLUMN effort TEXT NOT NULL DEFAULT ''"
             )
-        await _stamp_conversation_scopes(db)
+        await _stamp_conversation_scopes(db, within_migration=True)
     if "subagent_model" not in conv_cols:
         # #383: the chat's pinned sub-agent scope â€” complete
         # "provider::model" or '' (sub-agent: auto: global setting
@@ -684,7 +684,9 @@ async def _backfill_fts5_index(db: aiosqlite.Connection):
 _stamp_scope_done = False
 
 
-async def _stamp_conversation_scopes(db: aiosqlite.Connection):
+async def _stamp_conversation_scopes(
+    db: aiosqlite.Connection, within_migration: bool = False
+):
     """One-time stamp of every conversations row with the then-current global
     model + effort (issue #51/#76 "inherit = stamp on upgrade").
 
@@ -718,7 +720,11 @@ async def _stamp_conversation_scopes(db: aiosqlite.Connection):
     await db.execute(
         "UPDATE conversations SET model = '', effort = '' WHERE chat_type = 'agent'"
     )
-    await db.commit()
+    # #884: don't commit inside the migration — the migration commits once at
+    # the schema boundary after all ALTERs. Committing here would release the
+    # write lock and let a racing worker snapshot a half-migrated schema.
+    if not within_migration:
+        await db.commit()
 
 
 _repair_scope_done = False

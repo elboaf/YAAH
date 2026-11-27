@@ -79,6 +79,11 @@ _extract_tasks: set[asyncio.Task] = set()
 # breaker opens after a few consecutive failed summary calls so a broken
 # summarizer stops looping forever; a single success closes it again.
 _compaction_breakers: dict[int, _compaction_mod.CircuitBreaker] = {}
+# #884: the measured prompt size from each conversation's last *successful*
+# fold, so the engine's monotonic gate compares the next turn's measurement
+# against the fold it should supersede — not against the current turn's own
+# size (which would block the fold every turn).
+_compaction_last_fold_tokens: dict[int, int] = {}
 
 
 def _compaction_breaker_for(conversation_id: int) -> _compaction_mod.CircuitBreaker:
@@ -2412,26 +2417,39 @@ async def _run_agent_claimed(
     _compaction_model = (
         model_override or (conv or {}).get("model") or _compaction_cfg.get("model") or ""
     )
-    _compaction_last_tokens = (conv or {}).get("context_tokens")
+    # #884: the measured prompt size from the conversation's last *successful*
+    # fold, so the engine's monotonic gate compares the next turn's measurement
+    # against the fold it should supersede — not against the current turn's own
+    # size (which would block the fold every turn). Seed from the stored value
+    # so a restart still has a baseline; reset after a successful fold.
+    _compaction_last_tokens = _compaction_last_fold_tokens.get(conversation_id)
+    if _compaction_last_tokens is None:
+        _compaction_last_tokens = (conv or {}).get("context_tokens")
     _compaction_events: list[str] = []
     _compaction_raw_rows = (
         await get_messages(conversation_id) if include_history else []
     )
     try:
-        await _compaction_engine.run_compaction(
-            conversation_id,
-            model_client,
-            _compaction_cfg,
-            _compaction_model,
-            rows=_compaction_raw_rows,
-            policy=_compaction_mod.CompactionPolicy.defaults(),
-            circuit_breaker=_compaction_breaker_for(conversation_id),
-            last_compacted_tokens=_compaction_last_tokens,
-            cancel_ev=cancel_ev,
-            emit_status=lambda event: _compaction_events.append(
-                _ndjson(event)
-            ),
+        _compaction_fold_summary, _compaction_fold_watermark = (
+            await _compaction_engine.run_compaction(
+                conversation_id,
+                model_client,
+                _compaction_cfg,
+                _compaction_model,
+                rows=_compaction_raw_rows,
+                policy=_compaction_mod.CompactionPolicy.defaults(),
+                circuit_breaker=_compaction_breaker_for(conversation_id),
+                last_compacted_tokens=_compaction_last_tokens,
+                cancel_ev=cancel_ev,
+                emit_status=lambda event: _compaction_events.append(
+                    _ndjson(event)
+                ),
+            )
         )
+        # #884: a fold happened — record the size that was folded so the next
+        # turn's gate has the right baseline.
+        if _compaction_fold_summary is not None and _compaction_fold_watermark is not None:
+            _compaction_last_fold_tokens[conversation_id] = _compaction_last_tokens
         for _ce in _compaction_events:
             yield _ce
     except Exception as e:  # noqa: BLE001 - compaction must not break the turn

@@ -206,8 +206,10 @@ async def test_run_compaction_over_trigger_folds():
     cid = await create_conversation("fold-me")
     # Seed a long history. The recent rounds carry enough content that the
     # keep budget (see below) cannot cover them, forcing a fold of the older
-    # rounds.
-    long_content = "x " * 400  # ~200 tokens per round of content
+    # rounds. Each round's content is large enough that the corrected
+    # per-round token estimate (a round is counted once, not once per row)
+    # still exceeds keep_budget once the newest round is kept.
+    long_content = "x " * 1000  # ~500 tokens per round of content
     for mid, role, content in [
         (1, "user", "task one"),
         (2, "assistant", long_content),
@@ -219,9 +221,9 @@ async def test_run_compaction_over_trigger_folds():
         await loop_mod.add_message(cid, role, content)
     # Measured prompt size above the trigger for the small window.
     await set_conversation_usage(cid, 120_000, "m")
-    # window 10000 -> eff 5392 -> trigger 1296 -> keep ~777. The last two
-    # rounds each carry ~200 tokens, cumulative ~1000 > 777, so the older of
-    # them folds.
+    # window 10000 -> eff 5392 -> trigger 1296 -> keep ~777. Each round carries
+    # ~500 tokens; keeping the newest round (~500) then exceeds keep on the
+    # next round, so the older rounds fold.
     cfg = {"model_context": {"m": {"context_window": 10000}}}
 
     class _FakeMC:
