@@ -121,6 +121,24 @@ of scope. No backend or wire-format change.
   that boundary reverts to the textarea + overlay. The ADR status
   reflects that this is deliberate and hard-to-reverse-enough to record.
 
+## Bundle measurement (phase 5)
+
+Measured with `vite build` at the commit just before the overhaul landed
+(before-lexical, 95a5cc86) vs. the current tree:
+
+|                 | before-lexical | after-lexical | delta   |
+| --------------- | -------------: | ------------: | ------: |
+| Main JS bundle  |      706.82 kB |    962.92 kB | +256.1 kB |
+| JS gzip         |      207.01 kB |    287.63 kB |  +80.6 kB |
+| CSS             |       68.23 kB |     69.64 kB |  +1.4 kB |
+
+The composer overhaul adds ~256 kB raw (about +81 kB gzip, +39%) to the
+main JS bundle. This is the expected cost of shipping the `@lexical/*`
+libraries. The bundle is a single ~960 kB chunk that already exceeds the
+500 kB chunk-size warning; code-splitting the composer behind a
+`dynamic import()` was out of scope for #711 (the ADR's "Consequences"
+notes it as a possible future optimization).
+
 ## Revisit triggers
 
 - A formatting need becomes real and consistent → reconsider Tiptap.
