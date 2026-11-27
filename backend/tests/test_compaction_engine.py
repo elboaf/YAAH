@@ -141,6 +141,11 @@ async def test_load_history_injects_summary_and_skips_watermark():
     # Set the watermark against the actual row ids (they start at whatever the
     # throwaway DB hands out, not necessarily 1). The first three rows are the
     # folded part; the watermark is the newest of them.
+    # Guard against a stale read: under CI's -n 2 (shared agent.db) a second
+    # process's migration pass can skip the compaction_watermark ALTER when its
+    # schema check runs before the first process has committed it, leaving this
+    # connection's reads of the row NULL. Wait for the column to exist first.
+    await _ensure_watermark_column()
     persisted = await get_messages(cid)
     old_ids = [r["id"] for r in persisted[:3]]
     watermark = max(old_ids)
