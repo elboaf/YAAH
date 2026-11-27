@@ -4043,6 +4043,7 @@ dependencies = [
 name = "tao"
 version = "0.37.0"
 dependencies = [
+ "async-channel",
  "bitflags 2.13.2",
  "block2 0.6.2",
  "core-foundation",
