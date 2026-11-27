@@ -492,9 +492,10 @@ const genId = () => `m${nextId++}`
  *  Scoped to ask_user questions: `PendingPlanApproval` (plan field) and
  *  `PendingApproval` (tool/args field) share this choke point and have no
  *  question/options, so the guard keys on the `question` field's presence. */
-function isPhantomQuestion<T extends { question?: string; options?: unknown }>(
-  q: T,
-): boolean {
+function isPhantomQuestion(q: {
+  question?: unknown
+  options?: unknown
+}): boolean {
   return (
     'question' in q &&
     !String(q.question ?? '').trim() &&
@@ -516,7 +517,7 @@ function applyPending<T extends { convKey: string }>(
     return next
   }
   if (q === null) return {}
-  if (isPhantomQuestion(q)) {
+  if (isPhantomQuestion(q as { question?: unknown; options?: unknown })) {
     const next = { ...map }
     delete next[q.convKey]
     return next
