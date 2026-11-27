@@ -27,6 +27,11 @@ on:
           - windows
           - linux
           - all
+      ref:
+        description: "Optional branch/SHA to build (default: the pushed branch/commit)"
+        type: string
+        required: false
+        default: ""
 
 jobs:
   test-build:
@@ -42,7 +47,13 @@ jobs:
         os: ${{ fromJSON(github.event_name == 'pull_request' && '["Linux"]' || (inputs.platform == 'all' && '["windows-desktop", "Linux"]' || (inputs.platform == 'windows' && '["windows-desktop"]' || '["Linux"]'))) }}
     runs-on: ${{ matrix.os }}
     steps:
+      # Optional dispatch input to validate a specific branch/SHA without
+      # cutting a release tag (e.g. a fix branch for a release-pipeline
+      # failure). Empty = checkout's default (the event commit the run was
+      # dispatched for - NOT github.ref, which would track the branch tip).
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       - uses: actions/setup-node@v4
         with:
