@@ -1,0 +1,27 @@
+## RUN COMPLETE — handed off.
+
+**OUTCOME:** CI triage on the only red CI: PR #811 (`fix/issue-811-zombie-claim-ask-user`),
+failing on ONE frontend test — `src/issue308RemoteAskUser.test.tsx > a mid-stream failure clears
+the parked question` (error: "Unable to find an element with the text: which?").
+
+Diagnosed as load-induced flaky test, NOT a regression:
+- The test passes 10/10 locally on the failing branch and on master.
+- The identical test also failed on #855's CI with the same error.
+- Root cause: the mock stream rejects 20ms after parking the question; under CI load a
+  setTimeout reject lands between React's render and waitFor's next 50ms poll, so the parked
+  question never renders and findByText times out.
+
+KEY FINDING: the fix is ALREADY LANDED on master as commit `2a02adc0`
+"fix(test): make remote ask_user mid-stream failure test deterministic". The fix rejects the
+mock stream only AFTER the question is confirmed rendered (waiting on the rendered question,
+not a fixed timer) — exactly the deterministic fix. The #811 branch (now merged as PR #833)
+predates that commit, so its CI is stale.
+
+**STATE NOW:** branch issue-878 (from origin/master, contains only this handoff note, unpushed,
+no code changes). [AUTO] CI issue #878 OPEN then CLOSED as wontfix (fix already landed in
+2a02adc0). All open PRs (#876, #875, #874, #873, #871, #869, dependabot 861-864) are mergeable
+and CI green. Release-build failures (rc.37, workflow_dispatch, tag-on-bump, 2026-11-27) are
+on the old buggy --console sdkmanager state; fixed by #869 (open/mergeable/green).
+
+**NEXT RUN SHOULD:** done — pick new work. The flaky-test red CI is explained and resolved via
+the existing commit; no new PR needed.
