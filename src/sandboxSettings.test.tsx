@@ -23,13 +23,15 @@ vi.mock('./api', async (importOriginal) => {
 
 import { SandboxSettingsCard } from './components'
 
+// A Windows UA exercises the platform guard. Without it jsdom's default
+// UA (no "Windows") triggers the Windows-only guard and the card does
+// not render.
 describe('Windows Sandbox settings card (#112)', () => {
   beforeEach(() => {
     getConfig.mockResolvedValue({
       sandbox: { enabled: true, memory_mb: 8192 },
     })
     updateConfig.mockResolvedValue({ ok: true })
-    // Reset platform to Windows so a non-Windows test can't leak forward.
     Object.defineProperty(window.navigator, 'userAgent', {
       value: windowsAgent,
       configurable: true,
