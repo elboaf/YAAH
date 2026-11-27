@@ -482,6 +482,26 @@ const genId = () => `m${nextId++}`
  * removes the entry, so the old `q && q.callId === x ? null : q` filters
  * keep working unchanged.
  */
+/** A phantom ask_user card (#550): the model emitted an ask with no text
+ *  and no options (args {} / empty question). The live card renders a blank
+ *  "?" row that never resolves and parks the turn on nothing. Drop it at the
+ *  single choke point every ingestion path uses to set a pending question,
+ *  so the card never opens on an empty ask. A question with no text but real
+ *  options is kept: the options are the card.
+ *
+ *  Scoped to ask_user questions: `PendingPlanApproval` (plan field) and
+ *  `PendingApproval` (tool/args field) share this choke point and have no
+ *  question/options, so the guard keys on the `question` field's presence. */
+function isPhantomQuestion<T extends { question?: string; options?: unknown }>(
+  q: T,
+): boolean {
+  return (
+    'question' in q &&
+    !String(q.question ?? '').trim() &&
+    !(Array.isArray(q.options) && q.options.length > 0)
+  )
+}
+
 function applyPending<T extends { convKey: string }>(
   map: Record<string, T>,
   q: T | null | ((prev: T | null) => T | null),
@@ -496,6 +516,11 @@ function applyPending<T extends { convKey: string }>(
     return next
   }
   if (q === null) return {}
+  if (isPhantomQuestion(q)) {
+    const next = { ...map }
+    delete next[q.convKey]
+    return next
+  }
   return { ...map, [q.convKey]: q }
 }
 

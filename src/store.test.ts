@@ -412,6 +412,37 @@ describe('concurrent chats (issue #10)', () => {
     expect(useAgent.getState().pendingQuestions['1']).toBeUndefined()
   })
 
+  // #550: a phantom ask_user (empty text, no options) must not park a card.
+  it('drops a phantom empty ask_user question instead of parking it (#550)', () => {
+    useAgent.getState().setPendingQuestion({
+      callId: 'c1',
+      question: '',
+      options: [],
+      convKey: '1',
+    })
+    expect(useAgent.getState().pendingQuestions['1']).toBeUndefined()
+  })
+
+  it('keeps a question that has no text but real options (#550)', () => {
+    useAgent.getState().setPendingQuestion({
+      callId: 'c1',
+      question: '',
+      options: [{ label: 'Yes' }, { label: 'No' }],
+      convKey: '1',
+    })
+    expect(useAgent.getState().pendingQuestions['1']).toBeDefined()
+  })
+
+  it('drops a whitespace-only question (#550)', () => {
+    useAgent.getState().setPendingQuestion({
+      callId: 'c1',
+      question: '   ',
+      options: [],
+      convKey: '1',
+    })
+    expect(useAgent.getState().pendingQuestions['1']).toBeUndefined()
+  })
+
   it('keeps pending plan approvals isolated per conversation', () => {
     useAgent.getState().setPendingPlanApproval({
       callId: 'p1',
