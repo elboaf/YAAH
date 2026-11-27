@@ -69,9 +69,14 @@ ashpd = { version = "0.9", optional = true, default-features = false, features =
 urlencoding = { version = "2.1.0", optional = true }
 pollster = { version = "0.3", optional = true }
 # GTK
-gtk-sys = { version = "0.18.0", features = ["v3_24"], optional = true }
-glib-sys = { version = "0.18.0", optional = true }
-gobject-sys = { version = "0.18.0", optional = true }
+# glib-sys / gobject-sys bumped 0.18 -> 0.22.11 so they resolve to the
+# gtk-rs-core 0.22 git patch (the chain's single glib-sys) instead of the
+# crates.io 0.19.x, which collided with the patched graph (E0308
+# mismatched types, duplicate glib_sys::GSList). gtk-sys stays 0.19.0 (the
+# git-patched version that already needs glib-sys 0.22.11).
+gtk-sys = { version = "0.19.0", features = ["v3_24"], optional = true }
+glib-sys = { version = "^0.22.11", optional = true }
+gobject-sys = { version = "^0.22.11", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2.69"

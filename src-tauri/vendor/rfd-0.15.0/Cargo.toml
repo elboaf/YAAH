@@ -70,11 +70,17 @@ optional = true
 default-features = false
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\", target_os = \"dragonfly\", target_os = \"netbsd\", target_os = \"openbsd\"))".dependencies.glib-sys]
-version = "0.19.0"
+# 0.22.11 via the gtk-rs-core 0.22 git branch (the chain's single glib-sys),
+# matching what gtk-sys 0.19.0 pulls. The 0.19.0 registry version collided
+# with the patched crate graph and produced a duplicate glib_sys::GSList
+# type (E0308 mismatched types) at dialog_ffi.rs:136. See issue for the
+# release build failure. ^0.22.11 (not ^0.22.0) so it does NOT also match
+# the tag 0.22.0 checkout, which would reintroduce two glib-sys versions.
+version = "^0.22.11"
 optional = true
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\", target_os = \"dragonfly\", target_os = \"netbsd\", target_os = \"openbsd\"))".dependencies.gobject-sys]
-version = "0.19.0"
+version = "^0.22.11"
 optional = true
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\", target_os = \"dragonfly\", target_os = \"netbsd\", target_os = \"openbsd\"))".dependencies.gtk-sys]
