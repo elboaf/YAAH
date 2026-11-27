@@ -410,12 +410,13 @@ jobs:
         run: |
           set -euo pipefail
           GRADLE_HOME="$RUNNER_TEMP/gradle-$GRADLE_VERSION"
-          if [ ! -x "$GRADLE_HOME/$GRADLE_VERSION/bin/gradle" ]; then
+          if [ ! -x "$GRADLE_HOME/bin/gradle" ]; then
             curl -fsSL --retry 3 -o "$RUNNER_TEMP/gradle.zip" \
               "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip"
             unzip -q "$RUNNER_TEMP/gradle.zip" -d "$RUNNER_TEMP"
           fi
-          echo "$GRADLE_HOME/$GRADLE_VERSION/bin" >> "$GITHUB_PATH"
+          echo "$GRADLE_HOME/bin" >> "$GITHUB_PATH"
+          export PATH="$GRADLE_HOME/bin:$PATH"
           gradle --version | sed -n '1,4p'
 
       - name: Set up Android SDK
@@ -427,14 +428,17 @@ jobs:
           mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
           cd "$ANDROID_SDK_ROOT/cmdline-tools"
           curl -fsSL --retry 3 -o tools.zip \
-            "https://dl.google.com/android/repository/commandline-tools-linux-${ANDROID_TOOLS_VERSION}.zip"
+            "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_TOOLS_VERSION}_latest.zip"
           unzip -q tools.zip
           mv cmdline-tools latest
           # platform-34 for compileSdk/targetSdk 34, build-tools 34.0.0 for AGP 8.1,
           # platform-tools for adb. --accept-licenses avoids the interactive prompt.
-          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+          # Feed yes via process substitution so its SIGPIPE (when sdkmanager
+          # closes its input) cannot fail the pipeline under pipefail; only
+          # sdkmanager's real exit status fails the job.
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
             --accept-licenses --announce-license \
-            "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+            "platform-tools" "platforms;android-34" "build-tools;34.0.0" < <(yes)
 
       - name: Point local.properties at the Linux SDK
         # The repo ships android/local.properties with a Windows sdk.dir; overwrite
@@ -479,7 +483,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           tag="${RELEASE_TAG:-${GITHUB_REF_NAME}}"
-          files="yaah-android.apk"
+          files="android/yaah-android.apk"
           release_args=("$tag" --title "$tag" --generate-notes)
           if [ "${{ inputs.prerelease }}" = "true" ] || echo "$tag" | grep -Eq -- '-rc\.[0-9]+$'; then
             release_args+=(--prerelease)
