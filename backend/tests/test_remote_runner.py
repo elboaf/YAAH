@@ -867,3 +867,77 @@ async def test_remote_tool_result_carries_duration():
     rows = commit[2]["messages"]
     tool_row = next(r for r in rows if r["role"] == "tool")
     assert tool_row["duration_ms"] == tr["duration_ms"]
+
+
+# --- #903: handler-held claim (claimed=True) -------------------------------
+# The API handler claims the run slot BEFORE it builds the stream response
+# (atomic check+act), then passes claimed=True so the runner skips its own
+# claim and releases the handler-held claim exactly once.
+
+
+@pytest.mark.asyncio
+async def test_claimed_true_runs_without_reclaiming_and_releases_once(_isolate_db):
+    session = FakeSession("host-owner")
+    _register(session)
+    _script_events(
+        {"type": "content", "text": "hi"},
+        {"type": "finish", "reason": "stop"},
+    )
+    from backend.agent.remote_run_state import remote_runs as runs
+
+    # The handler holds the claim before invoking the runner.
+    assert await runs.claim("host-owner", "731")
+    # A second claim would now fail (the slot is ours), so if the runner
+    # tried to claim again it would see the slot busy. We prove it does NOT
+    # re-claim by asserting the slot is still held by us during the turn and
+    # is gone exactly once afterwards.
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "hi", "remote:host-ws:C:/repo", claimed=True))
+    assert _types(stream)[-1] == "done"
+    # Released exactly once: the slot is free now, and a fresh claim succeeds.
+    assert not await runs.is_running("host-owner", "731")
+    assert await runs.claim("host-owner", "731")
+    await runs.release("host-owner", "731")
+
+
+@pytest.mark.asyncio
+async def test_claimed_true_bad_workspace_returns_the_claim(_isolate_db):
+    """When the handler holds the claim and the workspace is invalid, the
+    runner must return the claim (release it) rather than leak it."""
+    session = FakeSession("host-owner")
+    _register(session)
+    _script_events(
+        {"type": "content", "text": "x"},
+        {"type": "finish", "reason": "stop"},
+    )
+    from backend.agent.remote_run_state import remote_runs as runs
+
+    assert await runs.claim("host-owner", "731")
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "hi", "", claimed=True))  # empty workspace
+    events = _events(stream)
+    assert events[0]["type"] == "error"
+    assert "workspace" in events[0]["message"]
+    # The claim was returned: the slot is free again.
+    assert not await runs.is_running("host-owner", "731")
+    assert await runs.claim("host-owner", "731")
+    await runs.release("host-owner", "731")
+
+
+@pytest.mark.asyncio
+async def test_claimed_false_still_claims_and_releases(_isolate_db):
+    """The un-claimed direct-call path (existing callers/tests) is unchanged:
+    the runner claims itself and releases once."""
+    session = FakeSession("host-owner")
+    _register(session)
+    _script_events(
+        {"type": "content", "text": "hi"},
+        {"type": "finish", "reason": "stop"},
+    )
+    from backend.agent.remote_run_state import remote_runs as runs
+
+    assert not await runs.is_running("host-owner", "731")
+    stream = await _collect(run_remote_turn(
+        "host-owner", "731", "hi", "remote:host-ws:C:/repo"))
+    assert _types(stream)[-1] == "done"
+    assert not await runs.is_running("host-owner", "731")

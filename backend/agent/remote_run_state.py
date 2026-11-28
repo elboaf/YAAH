@@ -37,6 +37,37 @@ class RemoteRunRegistry:
             self._runs[key] = _RunState()
             return True
 
+    async def claim_with_grace(
+        self,
+        owner_id: str,
+        conversation_id: str,
+        grace_seconds: float = 2.0,
+        poll_seconds: float = 0.1,
+    ) -> bool:
+        """Acquire the slot, tolerating a briefly-held stale claim.
+
+        The turn handler (main.py, api_remote_device_turn) claims BEFORE it
+        builds the stream response, so a just-finished or client-abandoned
+        turn whose stream generator has not finished tearing down still
+        holds the slot for a moment. That window is transient: the
+        generator's finally (or the loop's asyncgen aclose hook) releases
+        it within milliseconds to a few seconds. Poll inside the grace
+        window instead of refusing a fresh send with a 409 the client
+        cannot explain; refuse once the grace is spent, so a genuinely
+        live run still gets a clean 409.
+        """
+        key = self._key(owner_id, conversation_id)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, grace_seconds)
+        while True:
+            async with self._lock:
+                if key not in self._runs:
+                    self._runs[key] = _RunState()
+                    return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(poll_seconds)
+
     async def is_running(self, owner_id: str, conversation_id: str) -> bool:
         """Return whether this exact owner/chat pair has an active run."""
         key = self._key(owner_id, conversation_id)

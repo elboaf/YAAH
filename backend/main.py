@@ -3993,15 +3993,14 @@ async def api_remote_device_turn(host_id: str, conversation_id: str, body: Remot
     owner's lease-checked snapshot commit, never the local integer-keyed
     tables. Streaming NDJSON, same shapes as /api/agent/{id}.
     """
-    from backend.agent.remote_runner import remote_runs_is_running, run_remote_turn
+    from backend.agent.remote_runner import remote_runs, run_remote_turn
 
     owner_id = host_id  # the conversation's owner IS this device
-    if remote_runs_is_running(owner_id, conversation_id):
-        raise HTTPException(status_code=409, detail="a turn is already running in this conversation")
 
     # Resolve the turn workspace: request body first, then the cached
     # conversation row. A remote-owned chat needs a remote:<host>:<path>
     # workspace for tool dispatch; the runner fails closed without one.
+    # (Reads only — no claim needed to decide the 400.)
     workspace = body.workspace
     if not workspace:
         for row in await list_remote_conversations(owner_id):
@@ -4014,6 +4013,14 @@ async def api_remote_device_turn(host_id: str, conversation_id: str, body: Remot
             detail="remote turns require a workspace; pass one or cache this conversation's workspace first",
         )
 
+    # Claim BEFORE the response goes out: the old check-then-stream shape
+    # let two concurrent sends both pass the is_running check (the claim
+    # happened inside the stream generator) and 409'd a fresh send while a
+    # finished/abandoned turn's stream was still tearing down (#903).
+    # claim_with_grace rides out that transient teardown window.
+    if not await remote_runs.claim_with_grace(owner_id, conversation_id):
+        raise HTTPException(status_code=409, detail="a turn is already running in this conversation")
+
     return StreamingResponse(
         run_remote_turn(
             owner_id, conversation_id, body.message, workspace,
@@ -4021,6 +4028,7 @@ async def api_remote_device_turn(host_id: str, conversation_id: str, body: Remot
             # owner machine — qualify it against the local config.
             model_override=qualify_model_scope(body.model_override),
             effort_override=body.effort_override,
+            claimed=True,
         ),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
