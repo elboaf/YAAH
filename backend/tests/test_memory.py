@@ -325,12 +325,17 @@ def test_index_drop_oldest_project_first_when_over_budget(monkeypatch):
             encoding="utf-8",
         )
     _write_index(WS, "\n".join(lines))
-    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 3000)
+    # #891: the budget now measures the SAME wrapper the return renders, so it
+    # holds MAX_INDEX_CHARS exactly (the old logic under-subtracted ~70 chars
+    # and kept more entries than the cap allowed). cap=5000 keeps the newest
+    # project entries while dropping the oldest.
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 5000)
     block = memory.index_for_prompt(WS)
     assert "…[truncated]" in block
     assert "proj-000.md" not in block      # oldest project dropped first
     assert "proj-059.md" in block          # newest project kept
     assert "user-1.md" in block and "fb-1.md" in block  # pinned types kept
+    assert len(block) <= 5000              # cap holds exactly
 
 
 def test_entry_type_ignores_non_type_keys(monkeypatch):
@@ -446,3 +451,52 @@ def test_truncated_index_marker_points_at_memory_search(monkeypatch):
     monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 10)
     block = memory.index_for_prompt(WS)
     assert "memory_search" in block
+
+
+def test_index_for_prompt_marks_truncation_when_only_count_cap_drops_entries(monkeypatch):
+    # #891 (CodeRabbit): with 201+ short unpinned entries the entry-count cap
+    # removes the oldest even when the survivors fit the char budget — the
+    # marker must still announce the partial index.
+    for i in range(201):
+        memory.save_memory(WS, f"m-{i}", f"M{i}", "d", "project", "c")
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 100_000)
+    block = memory.index_for_prompt(WS)
+    assert "…[truncated]" in block  # count cap dropped, char trim never ran
+    assert "m-0.md" not in block    # oldest dropped by the count cap
+    assert "m-200.md" in block      # newest kept
+
+
+def test_entry_type_coerces_non_string_type_to_project():
+    # #891 (CodeRabbit): a `type: 123` frontmatter value made _entry_type call
+    # .strip() on an int, escaping index_for_prompt's documented-never-raises
+    # contract; the partition's except would then unpin every user/feedback
+    # entry. Coerce to 'project' instead.
+    memory.save_memory(WS, "badtype", "Bad", "d", "project", "x")
+    d = memory.ensure_dir(WS)
+    (d / "badtype.md").write_text(
+        "---\nname: badtype\ndescription: \"d\"\nmetadata:\n  type: 123\n---\n\n# Bad\n",
+        encoding="utf-8",
+    )
+    memory.save_memory(WS, "user-1", "U", "u", "user", "content")
+    _write_index(
+        WS,
+        "# Persistent memory\n\n"
+        "- [Bad](badtype.md) — d\n"
+        "- [U](user-1.md) — u\n",
+    )
+    assert memory._entry_type(d, "- [Bad](badtype.md) — d") == "project"
+    block = memory.index_for_prompt(WS)
+    assert "[user] - [U](user-1.md)" in block  # pinned entry survived (no except)
+
+
+def test_index_for_prompt_char_cap_holds_exactly_with_shared_wrapper(monkeypatch):
+    # #891 (CodeRabbit): the budget must measure the SAME strings the return
+    # renders — a drifted wrapper copy let a body right at the budget overshoot
+    # MAX_INDEX_CHARS by ~70 chars. The returned block is heading + body +
+    # footer, so it must hold the cap exactly.
+    for i in range(400):
+        memory.save_memory(WS, f"n-{i}", f"N{i}", "x" * 200, "project", "c")
+    monkeypatch.setattr(memory, "MAX_INDEX_CHARS", 5000)
+    block = memory.index_for_prompt(WS)
+    assert len(block) <= memory.MAX_INDEX_CHARS  # exact, not ~70 over
+    assert "…[truncated]" in block

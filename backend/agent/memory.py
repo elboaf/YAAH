@@ -33,7 +33,15 @@ def memory_root() -> Path:
 
 
 MAX_MEMORY_BODY_CHARS = 20_000
-MAX_INDEX_CHARS = 12_000
+# The index block the model sees each turn. Raised 12K -> 25K so the whole
+# store renders instead of hiding entries behind a memory_search call - a
+# dropped entry is only discoverable by search, and recall is what the model
+# keeps forgetting to do. Kept under the model's context budget.
+MAX_INDEX_CHARS = 25_000
+# Manifest cap: the model sees at most this many index lines. A store past
+# this truncates to the newest 200 (same bound as the extraction writer's
+# manifest), newest-first.
+MANIFEST_FILE_LIMIT = 200
 MAX_SLUG_LEN = 80
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,%d}$" % (MAX_SLUG_LEN - 1))
@@ -329,22 +337,39 @@ def _entry_type(idx_dir: Path, line: str, _cache: dict | None = None) -> str:
     except Exception:
         return _finish("project")
     t = ((meta or {}).get("metadata") or {}).get("type") if isinstance(meta, dict) else None
-    t = (t or "project").strip().lower()
+    # Non-string type values (e.g. `type: 123`) would make .strip() raise;
+    # the caller (index_for_prompt) is documented as never raising, and the
+    # partition's broad except would silently unpin every user/feedback
+    # entry over one such file — so coerce to 'project' like a missing type.
+    t = (t or "project").strip().lower() if isinstance(t, str) else "project"
     return _finish(
         t if t in ("user", "feedback", "project", "reference") else "project"
     )
 
 
+def _entry_type_line(idx_dir: Path, line: str, _cache: dict | None) -> str:
+    """The manifest line for `line`: its type tag plus the original link.
+    Type-prefixed so the model sees `[user]`/`[feedback]`/`[project]`/
+    `[reference]` at a glance (YCode's manifest style) — recall is what the
+    model keeps forgetting, and a visible type cuts the search it avoids."""
+    t = _entry_type(idx_dir, line, _cache)
+    return f"[{t}] {line}"
+
+
 def index_for_prompt(workspace: str | None) -> str:
     """The persistent-memory block for the system prompt: the project's
-    MEMORY.md index plus save/read/delete usage. Empty string while the
-    project has no index yet beyond the template — a fresh project gets
-    no prompt noise until a first memory exists. Never raises.
+    MEMORY.md index, rendered as a manifest, plus save/read/delete usage.
+    Empty string while the project has no index yet beyond the template — a
+    fresh project gets no prompt noise until a first memory exists. Never
+    raises.
 
-    Rendered type-prioritized (#192, folded from #228): user and feedback
-    entries pin to the top; when the index is over MAX_INDEX_CHARS the
-    oldest project-typed entries drop off first instead of amputating the
-    tail wholesale."""
+    Manifest render (YCode recall parity): every line is type-prefixed
+    (`[user]`, `[feedback]`, `[project]`, `[reference]`) and newest-first,
+    capped at MANIFEST_FILE_LIMIT entries, so the whole store lives in the
+    model's context each turn instead of being hidden behind a memory_search
+    the model forgets to call. Over MAX_INDEX_CHARS the oldest entries drop
+    first; user/feedback pin to the top so they survive trimming. MEMORY.md
+    is append-only (oldest first), so newest-first is the reversed list."""
     idx = _index_path(workspace)
     try:
         text = idx.read_text(encoding="utf-8", errors="replace").strip()
@@ -355,7 +380,10 @@ def index_for_prompt(workspace: str | None) -> str:
     # The template's own leading heading is stripped so the block renders
     # its heading exactly once, even after a user edit reintroduces it.
     text = re.sub(r"^#\s+Persistent memory[^\n]*\n*", "", text).strip()
-    lines = [ln for ln in text.splitlines() if ln.strip()]
+    # Only real entries (a "(slug.md)" link) render; the template's own
+    # "One line per memory file below" description line is not an entry and
+    # must not surface as a bogus [project] row.
+    lines = [ln for ln in text.splitlines() if ln.strip() and _ENTRY_RE.search(ln)]
     try:
         types: dict = {}
         pinned_idxs = {
@@ -365,25 +393,56 @@ def index_for_prompt(workspace: str | None) -> str:
         }
         # Partition by position, not content membership: an unpinned line
         # byte-identical to a pinned line must still render (CodeRabbit
-        # return trip #1 on PR #251).
+        # return trip #1 on PR #251). Both lists stay oldest-first; MEMORY.md
+        # is append-only, so newest-first is the reversed list at render.
         pinned = [ln for i, ln in enumerate(lines) if i in pinned_idxs]
         rest = [ln for i, ln in enumerate(lines) if i not in pinned_idxs]
     except Exception:  # noqa: BLE001 — optional context must never break a turn
         pinned, rest = [], lines
+
+    # Trim oldest-first, keeping the newest. Two independent guards: an
+    # entry-count cap (MANIFEST_FILE_LIMIT) and a char cap (MAX_INDEX_CHARS).
+    # The char guard is computed below against the rendered block; the entry
+    # guard here bounds how much we render at all. Pinned types survive.
+    # Either guard that drops an entry sets `dropped` — the truncation marker
+    # must announce that the index is partial, even when the surviving body
+    # then fits the char budget and the char trim never runs.
+    dropped = len(pinned) + len(rest) > MANIFEST_FILE_LIMIT
+    while len(pinned) + len(rest) > MANIFEST_FILE_LIMIT:
+        if rest:
+            rest.pop(0)
+        elif pinned:
+            pinned.pop(0)
+        else:
+            break
+
+    # Render newest-first: reverse each append-ordered list, pinned on top.
+    # Type-prefix each line (manifest style) so the model sees the type at a
+    # glance. `_entry_type` reads each linked file at most once via `_cache`.
+    pinned = list(reversed(pinned))
+    rest = list(reversed(rest))
     ordered = pinned + rest
-    body = "\n".join(ordered)
-    # The marker and the surrounding wrapper (heading + usage footer) are
-    # appended *after* trimming, so the decision to trim must be based on
-    # the whole rendered block, not just the body. Compute the wrapper and
-    # marker lengths up front and compare `wrapper + body` against the cap.
-    # The old logic compared only `len(body)`, so an index whose body fit
-    # but whose rendered block (body + wrapper) exceeded the limit was left
-    # untrimmed and ran past MAX_INDEX_CHARS (PR #818).
-    wrapper = (
+    prefixed = [_entry_type_line(idx.parent, ln, types) for ln in ordered]
+    body = "\n".join(prefixed)
+
+    # The heading and footer below are the EXACT strings the final `return`
+    # renders — defining them once keeps the budget's measurement identical to
+    # the block it decides to trim. A divergent copy lets the returned block
+    # exceed MAX_INDEX_CHARS by the divergence: PR #818's original logic
+    # compared only `len(body)`, and the wrapper copy here had drifted from
+    # the return text (longer intro, different footer spacing) so a body right
+    # at the budget still overshot the cap by ~70 chars.
+    heading = (
         "# Persistent memory (yours — for THIS project)\n\n"
-        "Durable facts you have saved about this user and project; each "
-        "line links a file you can read with the memory_read tool:\n\n"
-        "\nMaintain this memory with the memory_save, memory_read, "
+        "The full list of this project's saved memories, reloaded every turn "
+        "and across every conversation. This is authoritative context: read "
+        "it before you start a task, and consult it on every turn. A fact you "
+        "saved is knowledge you no longer have to re-derive — check it before "
+        "assuming you don't already know the answer.\n\n"
+        "Each line links a file you can read with the memory_read tool.\n\n"
+    )
+    footer = (
+        "\n\nMaintain this memory with the memory_save, memory_read, "
         "memory_delete tools.\n\n"
         f"{_WHEN_TO_SAVE}\n\n{_CONSULT_MEMORY}"
     )
@@ -392,27 +451,25 @@ def index_for_prompt(workspace: str | None) -> str:
         "index but still exist on disk; use memory_search to find "
         "them by topic, then memory_read the slug."
     )
-    if len(wrapper) + len(body) > MAX_INDEX_CHARS:
-        # Reserve space for the wrapper and marker so the final block stays
-        # near MAX_INDEX_CHARS, not just the body.
-        budget = MAX_INDEX_CHARS - len(wrapper) - len(marker)
-        # Drop oldest-first from `rest` until it fits; pinned types survive.
-        while rest and len("\n".join(pinned + rest)) > budget:
-            rest.pop(0)
-        # The cap is unconditional: pinned entries alone can exceed it, in
-        # which case the oldest pinned entries drop too (keep newest pinned)
-        # (CodeRabbit return trip #1 on PR #251).
-        if len("\n".join(pinned + rest)) > budget:
-            while pinned and len("\n".join(pinned + rest)) > budget:
-                pinned.pop(0)
-        body = "\n".join(pinned + rest) + marker
-    return (
-        "# Persistent memory (yours — for THIS project)\n\n"
-        "Durable facts you have saved about this user and project; each "
-        "line links a file you can read with the memory_read tool:\n\n"
-        f"{body}\n\n"
-        "Maintain this memory with the memory_save, memory_read, "
-        "memory_delete tools.\n\n"
-        f"{_WHEN_TO_SAVE}\n\n"
-        f"{_CONSULT_MEMORY}"
-    )
+    # The final block is exactly heading + body + footer (plus the marker when
+    # trimmed), so reserve all three in the body's budget.
+    budget = MAX_INDEX_CHARS - len(heading) - len(footer) - len(marker)
+    # `rest` and `pinned` are newest-first here, so pop from the END to drop
+    # the oldest. Rebuild the rendered body each pass; no re-reversing.
+    # Trim when EITHER limit removed entries: the char budget may already be
+    # satisfied after the count cap, but the marker must still announce that
+    # the index is partial.
+    if dropped or len(body) > budget:
+        while rest and len(body) > budget:
+            rest.pop()
+            ordered = pinned + rest
+            prefixed = [_entry_type_line(idx.parent, ln, types) for ln in ordered]
+            body = "\n".join(prefixed)
+        if len(body) > budget:
+            while pinned and len(body) > budget:
+                pinned.pop()
+                ordered = pinned + rest
+                prefixed = [_entry_type_line(idx.parent, ln, types) for ln in ordered]
+                body = "\n".join(prefixed)
+        body = body + marker
+    return heading + body + footer

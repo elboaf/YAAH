@@ -39,9 +39,6 @@ log = logging.getLogger("yaah.extract")
 # turns cover the two-pass strategy with slack, and the runner's budget
 # nudge keeps a wanderer converging.
 WRITER_MAX_TURNS = 5
-# Manifest cap: the writer sees at most this many index lines (zcode caps
-# at 200 as well).
-MAX_MANIFEST_ENTRIES = 200
 # A genuine user turn is at least this many words; tool-only and synthetic
 # turns never trigger a model call.
 MIN_PROSE_WORDS = 3
@@ -177,21 +174,21 @@ async def plan_extraction(conversation_id: int) -> dict | None:
 
 def _manifest(workspace: str | None) -> str:
     """The existing-memory index handed to the writer so it updates rather
-    than duplicates. ponytail: index order (append = oldest first), tail
-    kept under the cap - mtime-sorting like zcode buys nothing at this
-    size; revisit if stores grow past a few hundred entries."""
-    idx = memory.memory_dir(workspace) / "MEMORY.md"
-    try:
-        text = idx.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    than duplicates. Type-prefixed and newest-first, mirroring the render
+    the model sees each turn, so the writer classifies and dedupes against
+    the same authoritative list. Capped at the newest 200 entries; only
+    real index lines render (no template prose)."""
+    # Reuse the render the model sees each turn - it already produces the
+    # type-prefixed, newest-first, capped list - then strip the wrapper so
+    # the writer gets pure index lines.
+    block = memory.index_for_prompt(workspace)
+    if not block:
         return ""
     lines = [
         ln.rstrip()
-        for ln in text.splitlines()
-        if ln.strip() and not ln.lstrip().startswith("#")
+        for ln in block.splitlines()
+        if ln.startswith("[") and ".md)" in ln
     ]
-    if len(lines) > MAX_MANIFEST_ENTRIES:
-        lines = lines[-MAX_MANIFEST_ENTRIES:]
     return "\n".join(lines)
 
 
