@@ -926,7 +926,7 @@ export const useAgent = create<AgentState>((set, get) => ({
           : s.objectiveByConv
       const draftLive = s.runLiveByConv.draft
       const nextRunLive = draftLive
-        ? { ...s.runLiveByConv, [cid]: true, draft: undefined }
+        ? ({ ...s.runLiveByConv, [cid]: true, draft: undefined } as typeof s.runLiveByConv)
         : s.runLiveByConv
       return {
         conversationId: opts?.preserveSelection ? s.conversationId : id,

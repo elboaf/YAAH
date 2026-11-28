@@ -106,7 +106,7 @@ beforeEach(async () => {
     messagesByConv: { 9: [] },
     objectiveByConv: { 9: 'build the login flow' }, // stale, from the prior run
     runLiveByConv: {},
-    todosByConv: { 9: [{ content: 'old step', status: 'completed' }] },
+    todosByConv: { 9: [{ content: 'old step', status: 'completed', priority: 'medium' }] },
     statusByConv: {},
     queueEchoByConv: {},
     pendingQuestions: {},
