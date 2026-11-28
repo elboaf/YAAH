@@ -392,7 +392,14 @@ jobs:
       # on Gradle 8.5 (the 9.7.1 wrapper is incompatible). No wrapper exists in
       # android/, so Gradle is provisioned here explicitly.
       ANDROID_TOOLS_VERSION: "11076708"
-      ANDROID_SDK_ROOT: "$RUNNER_TEMP/android-sdk"
+      # #897: YAML env values do not expand shell variables — the literal
+      # "$RUNNER_TEMP/android-sdk" here landed verbatim in android/local.properties
+      # and Gradle failed SDK detection on rc.39/rc.40. Context expressions DO
+      # expand in env blocks; runner.temp is the same directory $RUNNER_TEMP
+      # resolves to inside a step's shell.
+      ANDROID_SDK_ROOT: "${{ runner.temp }}/android-sdk"
+      # AGP checks ANDROID_HOME when sdk.dir is absent; same resolved path.
+      ANDROID_HOME: "${{ runner.temp }}/android-sdk"
       GRADLE_VERSION: "8.5"
     steps:
       - uses: actions/checkout@v4
