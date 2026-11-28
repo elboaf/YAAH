@@ -1467,13 +1467,13 @@ export function ObjectiveCard({ objective, iteration, todos }: {
 
 /** Floating goal checklist overlay (the ycode/zcode multi-goal card).
  *
- * The inline `ObjectiveCard` renders in the transcript, but the multi-goal
- * checklist is meant to hover ABOVE the composer as a persistent, dismissable
- * card that crosses items off as the run progresses. This is that overlay:
- * it reads the same live `todos` from the store the inline card does, so it
- * stays in sync with every `TodoWrite` without its own state. It renders only
- * when a checklist exists (the inline card already shows the objective with no
- * checklist), and the user can dismiss it with the ×.
+ * This is the single goal surface in the local chat (#892 removed the inline
+ * `ObjectiveCard` that used to sit in the transcript alongside it — the two
+ * drew the same objective + checklist, which was never the intent). It hovers
+ * ABOVE the composer as a persistent, dismissable card that crosses items off
+ * as the run progresses. It reads the live `todos` from the store, so it stays
+ * in sync with every `TodoWrite` without its own state. It renders only when a
+ * checklist exists, and the user can dismiss it with the ×.
  */
 export function GoalOverlay({
   objective,
@@ -10818,8 +10818,7 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
     (s) => s.todosByConv[s.conversationId === null ? 'draft' : String(s.conversationId)],
   )
   // Floating goal-checklist overlay is dismissable; it only shows once a
-  // checklist exists (the inline ObjectiveCard covers the objective with no
-  // checklist).
+  // checklist exists (#892: it is now the only goal surface in the local chat).
   const [showGoalOverlay, setShowGoalOverlay] = useState(false)
   const error = useError()
   const pendingQuestion = useAgent((s) => {
@@ -11266,9 +11265,10 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
             </p>
           </div>
         )}
-        {objectiveText && (
-          <ObjectiveCard objective={objectiveText} iteration={goalIterationCount(messages)} todos={todos} />
-        )}
+        {/* #892: the inline goal card is gone — the goal surface is the
+            floating GoalOverlay below, rendered once a checklist exists. The
+            card and the overlay both drew the objective + checklist in the
+            same chat, which was never the intent. */}
         {messages.map((m) => (
           <MessageView key={m.id} msg={m} live={m.id === liveId} />
         ))}
@@ -11292,9 +11292,9 @@ export function ChatPanel() {  const conversationId = useAgent((s) => s.conversa
           </div>
         )}
       </div>
-      {/* #855: floating multi-goal checklist overlay. Renders once a
-          checklist exists (the inline ObjectiveCard covers the objective with
-          no checklist). Dismissable; the live store keeps it in sync. */}
+      {/* #855: floating multi-goal checklist overlay — the single goal surface
+          in the local chat (#892). Renders once a checklist exists; dismissable;
+          the live store keeps it in sync. */}
       {showGoalOverlay && todos && todos.length > 0 && (
         <GoalOverlay
           objective={objectiveText}
