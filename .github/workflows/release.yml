@@ -392,8 +392,16 @@ jobs:
       # on Gradle 8.5 (the 9.7.1 wrapper is incompatible). No wrapper exists in
       # android/, so Gradle is provisioned here explicitly.
       ANDROID_TOOLS_VERSION: "11076708"
-      ANDROID_SDK_ROOT: "$RUNNER_TEMP/android-sdk"
       GRADLE_VERSION: "8.5"
+      # #897: the SDK path vars (ANDROID_SDK_ROOT / ANDROID_HOME) are set at
+      # STEP level, not here — the literal "$RUNNER_TEMP/android-sdk" in this
+      # job env landed verbatim in android/local.properties and broke SDK
+      # detection on rc.39/rc.40, and ${{ runner.temp }} in a JOB-level env
+      # block evaluates to the empty string (the runner context is not
+      # available at that level per the context-availability table; step
+      # level env is where it works). They are defined on the two steps that
+      # read them: "Point local.properties at the Linux SDK" and
+      # "Build debug APK".
     steps:
       - uses: actions/checkout@v4
         with:
@@ -445,6 +453,10 @@ jobs:
       - name: Point local.properties at the Linux SDK
         # The repo ships android/local.properties with a Windows sdk.dir; overwrite
         # it on the runner (ephemeral, never committed) so Gradle finds the SDK.
+        # runner.temp is allowed here (step-level env) and resolves to the same
+        # directory the SDK setup step's "$RUNNER_TEMP" export used.
+        env:
+          ANDROID_SDK_ROOT: "${{ runner.temp }}/android-sdk"
         shell: bash
         run: |
           set -euo pipefail
@@ -452,6 +464,11 @@ jobs:
           cat android/local.properties
 
       - name: Build debug APK
+        # sdk.dir in local.properties is primary; ANDROID_HOME is the fallback
+        # AGP checks when sdk.dir is absent — same resolved path.
+        env:
+          ANDROID_SDK_ROOT: "${{ runner.temp }}/android-sdk"
+          ANDROID_HOME: "${{ runner.temp }}/android-sdk"
         shell: bash
         working-directory: android
         run: |
