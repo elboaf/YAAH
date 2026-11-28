@@ -337,7 +337,11 @@ def _entry_type(idx_dir: Path, line: str, _cache: dict | None = None) -> str:
     except Exception:
         return _finish("project")
     t = ((meta or {}).get("metadata") or {}).get("type") if isinstance(meta, dict) else None
-    t = (t or "project").strip().lower()
+    # Non-string type values (e.g. `type: 123`) would make .strip() raise;
+    # the caller (index_for_prompt) is documented as never raising, and the
+    # partition's broad except would silently unpin every user/feedback
+    # entry over one such file — so coerce to 'project' like a missing type.
+    t = (t or "project").strip().lower() if isinstance(t, str) else "project"
     return _finish(
         t if t in ("user", "feedback", "project", "reference") else "project"
     )
@@ -400,6 +404,10 @@ def index_for_prompt(workspace: str | None) -> str:
     # entry-count cap (MANIFEST_FILE_LIMIT) and a char cap (MAX_INDEX_CHARS).
     # The char guard is computed below against the rendered block; the entry
     # guard here bounds how much we render at all. Pinned types survive.
+    # Either guard that drops an entry sets `dropped` — the truncation marker
+    # must announce that the index is partial, even when the surviving body
+    # then fits the char budget and the char trim never runs.
+    dropped = len(pinned) + len(rest) > MANIFEST_FILE_LIMIT
     while len(pinned) + len(rest) > MANIFEST_FILE_LIMIT:
         if rest:
             rest.pop(0)
@@ -417,21 +425,24 @@ def index_for_prompt(workspace: str | None) -> str:
     prefixed = [_entry_type_line(idx.parent, ln, types) for ln in ordered]
     body = "\n".join(prefixed)
 
-    # The marker and the surrounding wrapper (heading + usage footer) are
-    # appended *after* trimming, so the decision to trim must be based on
-    # the whole rendered block, not just the body. Compute the wrapper and
-    # marker lengths up front and compare `wrapper + body` against the cap.
-    # The old logic compared only `len(body)`, so an index whose body fit
-    # but whose rendered block (body + wrapper) exceeded the limit was left
-    # untrimmed and ran past MAX_INDEX_CHARS (PR #818).
-    wrapper = (
+    # The heading and footer below are the EXACT strings the final `return`
+    # renders — defining them once keeps the budget's measurement identical to
+    # the block it decides to trim. A divergent copy lets the returned block
+    # exceed MAX_INDEX_CHARS by the divergence: PR #818's original logic
+    # compared only `len(body)`, and the wrapper copy here had drifted from
+    # the return text (longer intro, different footer spacing) so a body right
+    # at the budget still overshot the cap by ~70 chars.
+    heading = (
         "# Persistent memory (yours — for THIS project)\n\n"
         "The full list of this project's saved memories, reloaded every turn "
         "and across every conversation. This is authoritative context: read "
-        "it before you start, and consult it on every turn — a fact you saved "
-        "is knowledge you no longer have to re-derive. Each line links a file "
-        "you can read with the memory_read tool.\n\n"
-        "\nMaintain this memory with the memory_save, memory_read, "
+        "it before you start a task, and consult it on every turn. A fact you "
+        "saved is knowledge you no longer have to re-derive — check it before "
+        "assuming you don't already know the answer.\n\n"
+        "Each line links a file you can read with the memory_read tool.\n\n"
+    )
+    footer = (
+        "\n\nMaintain this memory with the memory_save, memory_read, "
         "memory_delete tools.\n\n"
         f"{_WHEN_TO_SAVE}\n\n{_CONSULT_MEMORY}"
     )
@@ -440,33 +451,25 @@ def index_for_prompt(workspace: str | None) -> str:
         "index but still exist on disk; use memory_search to find "
         "them by topic, then memory_read the slug."
     )
-    budget = MAX_INDEX_CHARS - len(wrapper) - len(marker)
+    # The final block is exactly heading + body + footer (plus the marker when
+    # trimmed), so reserve all three in the body's budget.
+    budget = MAX_INDEX_CHARS - len(heading) - len(footer) - len(marker)
     # `rest` and `pinned` are newest-first here, so pop from the END to drop
     # the oldest. Rebuild the rendered body each pass; no re-reversing.
-    if len(body) > budget:
-        while rest and len("\n".join(prefixed)) > budget:
+    # Trim when EITHER limit removed entries: the char budget may already be
+    # satisfied after the count cap, but the marker must still announce that
+    # the index is partial.
+    if dropped or len(body) > budget:
+        while rest and len(body) > budget:
             rest.pop()
             ordered = pinned + rest
             prefixed = [_entry_type_line(idx.parent, ln, types) for ln in ordered]
             body = "\n".join(prefixed)
         if len(body) > budget:
-            while pinned and len("\n".join(prefixed)) > budget:
+            while pinned and len(body) > budget:
                 pinned.pop()
                 ordered = pinned + rest
                 prefixed = [_entry_type_line(idx.parent, ln, types) for ln in ordered]
                 body = "\n".join(prefixed)
         body = body + marker
-    return (
-        "# Persistent memory (yours — for THIS project)\n\n"
-        "The full list of this project's saved memories, reloaded every turn "
-        "and across every conversation. This is authoritative context: read "
-        "it before you start a task, and consult it on every turn. A fact you "
-        "saved is knowledge you no longer have to re-derive — check it before "
-        "assuming you don't already know the answer.\n\n"
-        "Each line links a file you can read with the memory_read tool.\n\n"
-        f"{body}\n\n"
-        "Maintain this memory with the memory_save, memory_read, "
-        "memory_delete tools.\n\n"
-        f"{_WHEN_TO_SAVE}\n\n"
-        f"{_CONSULT_MEMORY}"
-    )
+    return heading + body + footer
