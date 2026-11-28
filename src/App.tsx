@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
 import { quantizeUiScale } from './jitter'
-import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, ImageLightbox, PreviewModal, RemoteRunWatcher, Sidebar, SettingsView, ToastStack } from './components'
+import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, ImageLightbox, PreviewModal, RemoteRunWatcher, Sidebar, SettingsView, ToastStack, useModelList } from './components'
 import { NativeMenuGate } from './nativeMenu'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
@@ -223,7 +223,17 @@ function RestoreSession() {
 }
 
 export default function App() {
+  // #896: the Sidebar's Settings button dispatches `settings-opened`; App
+  // owns the page swap (ChatPanel ↔ SettingsView) since the #889 refactor.
+  // A listener here was never added, so the button set a dead local and
+  // nothing opened — this is what re-opens the page.
   const [showSettings, setShowSettings] = useState(false)
+  const { refresh: refreshModels } = useModelList()
+  useEffect(() => {
+    const open = () => setShowSettings(true)
+    window.addEventListener('settings-opened', open)
+    return () => window.removeEventListener('settings-opened', open)
+  }, [])
   return (
     <div className="relative flex h-full w-full bg-[#1e1e1e] text-[#d4d4d4] font-sans">
       {/* #287: suppress the WebView2 default context menu outside editables
@@ -249,7 +259,15 @@ export default function App() {
           its wiring stay in components.tsx — restore by re-adding the mount:
           <FilesPanel /> */}
       {showSettings ? (
-        <SettingsView onClose={() => setShowSettings(false)} />
+        <SettingsView
+          onClose={() => {
+            setShowSettings(false)
+            // The old SettingsModal close ran this; keep it — a fresh probe
+            // after config edits, bypassing TTL (#685 strip comment).
+            void useAgent.getState().refreshGlobals()
+            refreshModels()
+          }}
+        />
       ) : (
         <ChatPanel />
       )}

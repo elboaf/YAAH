@@ -4583,10 +4583,6 @@ export const DEFAULT_LOCKSTEP_HINT = ' Also sets the default for new chats.'
 
 export function Sidebar() {
   const { newConversation, workspace, setWorkspace, refreshGlobals, setConversationId, loadHistory } = useAgent()
-  // #685: the strip no longer shows pickers; it only needs refresh for the
-  // Settings-close path (a fresh probe after config edits, bypassing TTL).
-  const { refresh: refreshModels } = useModelList()
-  const [showSettings, setShowSettings] = useState(false)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
   const [addingDevice, setAddingDevice] = useState(false)
   const [notice, setNotice] = useState<{ title: string; message: string } | null>(null)
@@ -4728,10 +4724,10 @@ export function Sidebar() {
               className="sw-strip-row"
               aria-label="Settings"
               title="Settings"
-              onClick={() => {
-                setShowSettings(true)
-                window.dispatchEvent(new CustomEvent('settings-opened'))
-              }}
+              // #896: App owns the Settings page swap and listens for this
+              // event — the local setShowSettings here was dead state
+              // (App's own flag never turned on), so the page never opened.
+              onClick={() => window.dispatchEvent(new CustomEvent('settings-opened'))}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="3" />
