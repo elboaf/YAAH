@@ -200,24 +200,32 @@ async def run_remote_turn(
     workspace: str = "",
     model_override: str = "",
     effort_override: str | None = None,
+    claimed: bool = False,
 ) -> AsyncIterator[str]:
     """One owner-qualified turn. Yields the same JSON-line event shapes as
     the local loop so the existing frontend stream consumer works.
 
     Claims the (owner, chat) run slot for the whole turn; the owner's edit
     lease is held from before the first model call until the commit lands.
+
+    ``claimed=True``: the caller (the API handler) already holds the claim
+    and passed it in, so the internal claim is skipped. Either way the
+    slot is released exactly once, in the finally below.
     """
     workspace = workspace or ""
     if not workspace or remote_mod.parse_ns(workspace) is None:
         # Fail closed: a remote-owned turn needs an explicit workspace owner
         # for tool dispatch; guessing the legacy active host is forbidden.
+        if claimed:
+            # The caller owns the claim; return it — this turn never ran.
+            await remote_runs.release(owner_id, conversation_id)
         yield _ndjson({
             "type": "error",
             "message": "remote turns require a remote:<host-id>:<path> workspace",
         })
         return
 
-    if not await remote_runs.claim(owner_id, conversation_id):
+    if not claimed and not await remote_runs.claim(owner_id, conversation_id):
         yield _ndjson({
             "type": "error",
             "message": "a turn is already running in this conversation",
