@@ -10339,10 +10339,19 @@ export function ChatScopePickers() {
       .then((c) => {
         if (!cancelled) {
           setRowScope({ model: c.model || '', effort: c.effort || '', subagent_model: c.subagent_model || '' })
-          // #844 (follow-up): seed the durable objective from the conversation
-          // row's session_goal (authoritative — survives resume/restart). An
-          // explicit setObjective wins over the first-user-message fallback.
-          useAgent.getState().setObjective(String(conversationId), c.session_goal || '')
+          // #895: NEVER seed the objective from the row while this chat has a
+          // run live. This effect also runs on every streaming transition,
+          // and at run-start the row still holds the PREVIOUS run's
+          // session_goal (the backend resets it only once the turn starts),
+          // so a mid-run read clobbers the live objective — the overlay
+          // summary stayed on the old goal until the run ended (#895). The
+          // run-start objective is owned by the send path now (it writes it
+          // when the run begins, and clears runLive when the run ends); this
+          // row seed stays authoritative for chat-switch and resume, where
+          // no run is live and the client store is the laggard.
+          if (!useAgent.getState().runLiveByConv[String(conversationId)]) {
+            useAgent.getState().setObjective(String(conversationId), c.session_goal || '')
+          }
           // #855: seed the durable multi-goal checklist from the conversation
           // row's session_todos (authoritative — survives resume/restart).
           // #867: guard on checklistRevision — a live TodoWrite already ran
@@ -12727,6 +12736,27 @@ export function Composer({
       } else {
         cid = targetConversationId
       }
+      // #895: a new run's root prompt becomes the durable objective, mirroring
+      // the backend's session_goal reset (loop.py). The overlay STEPS refresh
+      // live via every TodoWrite, but the SUMMARY (objectiveByConv) was only
+      // re-seeded when the turn ENDED (ChatScopePickers' getConversation), so
+      // a new run in an existing chat showed the PREVIOUS goal until it
+      // finished. Refresh it here, at run-start — the same trigger as the
+      // steps. A steer (queued mid-run) is a separate queueInput/steerInput
+      // path and never reaches here, and the backend deliberately leaves
+      // session_goal alone on a steer, so this is safe.
+      //
+      // Skip image/attachment-only turns (empty text): the backend keeps the
+      // last user message's goal in that case, so don't blank it.
+      if (displayText.trim()) {
+        useAgent.getState().setObjective(bufKey, displayText.trim())
+      }
+      // #895: mark the run live for the row-seed guard (ChatScopePickers must
+      // not re-seed the objective from the row while this run is in flight —
+      // at run-start the row still holds the previous run's session_goal).
+      // Cleared in the finally below; a same-value re-seed at run-end is
+      // harmless and re-asserts the authoritative row.
+      useAgent.getState().setRunLive(bufKey, true)
       setStatus(bufKey, 'thinking')
       await streamAgentTurn(
         cid,
@@ -12784,6 +12814,10 @@ export function Composer({
     } finally {
       setSending(false)
       setAbortController(bufKey, null)
+      // #895: the run is over — lift the row-seed guard so the next
+      // chat-switch/resume re-seeds the objective from the row again.
+      useAgent.getState().setRunLive(bufKey, false)
+      if (entryKey !== bufKey) useAgent.getState().setRunLive(entryKey, false)
       setSendingKey((k) => (k === entryKey || k === bufKey ? null : k))
       const autosend = pendingQueueAutosendRef.current[bufKey]
       if (autosend) {
