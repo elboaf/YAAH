@@ -340,6 +340,12 @@ interface AgentState {
    *  metadata arrives). Drives the top-of-chat objective card. */
   objectiveByConv: Record<string, string>
   setObjective: (key: string, objective: string) => void
+  /** #895: buffers with a run live RIGHT NOW (send() set it at run-start,
+   *  clears it in its finally). The row-seed (ChatScopePickers) skips the
+   *  objective for a live run — at run-start the row still holds the PREVIOUS
+   *  run's session_goal, so a mid-run read would clobber the fresh one. */
+  runLiveByConv: Record<string, boolean>
+  setRunLive: (key: string, live: boolean) => void
   /** #855: the durable multi-goal checklist per conversation, keyed by
    *  conversation id. Seeded from the conversation row's `session_todos`
    *  (authoritative — survives resume/restart) and updated live by
@@ -790,6 +796,11 @@ export const useAgent = create<AgentState>((set, get) => ({
   objectiveByConv: {},
   setObjective: (key, objective) =>
     set((s) => ({ objectiveByConv: { ...s.objectiveByConv, [key]: objective } })),
+  runLiveByConv: {},
+  setRunLive: (key, live) =>
+    set((s) => ({
+      runLiveByConv: { ...s.runLiveByConv, [key]: live },
+    })),
   todosByConv: {},
   setTodos: (key, todos) =>
     set((s) => ({ todosByConv: { ...s.todosByConv, [key]: todos } })),
@@ -901,6 +912,22 @@ export const useAgent = create<AgentState>((set, get) => ({
       const nextStatus = st
         ? { ...s.statusByConv, draft: undefined, [cid]: st } as typeof s.statusByConv
         : s.statusByConv
+      // #895: re-home the draft's durable objective and run-live flag to the
+      // real cid, alongside messagesByConv and statusByConv. appendUserMessage
+      // seeded objectiveByConv['draft'] on the first send and send() sets
+      // runLiveByConv['draft'] at run-start — both fire before adoptDraft
+      // re-keys the buffer. Without this, the on-screen objective (keyed on
+      // the real cid) would be empty for a draft-born run and the row-seed
+      // guard (also keyed on the real cid) would not see the live run.
+      const draftObjective = s.objectiveByConv.draft
+      const nextObjective =
+        draftObjective !== undefined && s.objectiveByConv.draft
+          ? { ...s.objectiveByConv, [cid]: s.objectiveByConv.draft, draft: '' }
+          : s.objectiveByConv
+      const draftLive = s.runLiveByConv.draft
+      const nextRunLive = draftLive
+        ? ({ ...s.runLiveByConv, [cid]: true, draft: undefined } as typeof s.runLiveByConv)
+        : s.runLiveByConv
       return {
         conversationId: opts?.preserveSelection ? s.conversationId : id,
         messagesByConv: {
@@ -911,6 +938,8 @@ export const useAgent = create<AgentState>((set, get) => ({
           draft: [],
         },
         statusByConv: nextStatus,
+        objectiveByConv: nextObjective,
+        runLiveByConv: nextRunLive,
         // The draft is filed now (#32): the destination card's job is done.
         draftDestination: null,
         // #51/#76: the draft-held model/effort are in the row now.
