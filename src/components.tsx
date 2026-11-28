@@ -138,6 +138,7 @@ import { setSoundsEnabled } from './NotificationSounds'
 import { useRemote, nsWorkspace, parseNsWorkspace } from './remoteStore'
 import { diffLines, langOf, type DiffLine } from './codeview'
 import { tapeOffsetPx, quantizeUiScale } from './jitter'
+import { summarizeObjective } from './summarizeObjective'
 import { CodeBlock, AgentMarkdown } from './markdown'
 import { emissionSegments, isInlineImageAnchor } from './emissionSegments'
 import { VoiceRecorder } from './voice'
@@ -1440,7 +1441,10 @@ export function ObjectiveCard({ objective, iteration, todos }: {
           <span className="lg-sub text-zinc-400">{completedCount}/{todos.length} done</span>
         )}
       </div>
-      <div className="px-1 pb-1 pt-1 text-xs leading-snug text-zinc-200">{objective}</div>
+      {/* #893: display-only summary — the verbatim objective stays in the
+          store / message history / agent context; only the rendered text is
+          shortened (see summarizeObjective). */}
+      <div className="px-1 pb-1 pt-1 text-xs leading-snug text-zinc-200">{summarizeObjective(objective)}</div>
       {todos && todos.length > 0 && (
         <ul className="px-1 pb-2 pt-1 space-y-0.5">
           {todos.map((t, i) => (
@@ -1513,7 +1517,10 @@ export function GoalOverlay({
           ×
         </button>
       </div>
-      <div className="shrink-0 px-3 py-2 text-xs leading-snug text-zinc-200 overflow-x-auto whitespace-pre-wrap break-words">{objective}</div>
+      {/* #893: display-only summary — the verbatim objective stays in the
+          store / message history / agent context; only the rendered text is
+          shortened (see summarizeObjective). */}
+      <div className="shrink-0 px-3 py-2 text-xs leading-snug text-zinc-200 overflow-x-auto whitespace-pre-wrap break-words">{summarizeObjective(objective)}</div>
       <ul className="shrink-0 flex-1 space-y-0.5 overflow-y-auto px-3 pb-3 pt-1">
         {todos.map((t, i) => (
           <li key={i} className="flex items-start gap-2 text-[11px] leading-snug">
