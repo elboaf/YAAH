@@ -6450,6 +6450,40 @@ export function AgentSayWatcher() {
   return null
 }
 
+/** Global agent step budget (issue #838): the cap applied to every model
+ *  without its own per-model entry (Settings → Providers → a model row
+ *  overrides this). '' = untouched (the shipped default applies); a value
+ *  overrides the global; 0 = unlimited at any level. The draft is shipped
+ *  through the Settings modal's Save payload (max_steps), not on blur. */
+export function StepBudgetSettingsCard({
+  draft,
+  onChange,
+}: {
+  draft: number | ''
+  onChange: (v: number | '') => void
+}) {
+  return (
+    <SettingsCard title="Step budget" className="col-span-4">
+      <label className="block text-xs text-zinc-300">Max steps</label>
+      <input
+        type="number"
+        min="0"
+        className={`${settingsInputCls} w-32 shrink-0`}
+        value={draft}
+        onChange={(e) =>
+          onChange(e.target.value === '' ? '' : Number(e.target.value))
+        }
+        aria-label="Global max steps"
+        title="Steps per turn before the step-budget message fires. '' = the shipped default; 0 = unlimited."
+      />
+      <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-600">
+        Global cap for every model without its own per-model entry (Settings →
+        Providers → a model row overrides this). 0 = unlimited.
+      </p>
+    </SettingsCard>
+  )
+}
+
 /** Settings card: the Windows Sandbox toggle (issue #112). Mirrors the
  *  saved `sandbox.enabled` config flag and probes /api/sandbox/status for
  *  feature availability; when the Windows feature is missing it renders the
@@ -8101,6 +8135,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // Interface scale draft (100–200% slider, #171) — applied live on drag,
   // persisted on save.
   const [uiScale, setUiScale] = useState(1.0)
+  // Global agent step budget (Settings -> Advanced -> Max steps). '' =
+  // untouched (the shipped default applies); a value overrides the global
+  // for every model without its own per-model entry (issue #838). 0 =
+  // unlimited at any level.
+  const [maxStepsDraft, setMaxStepsDraft] = useState<number | ''>('')
   const [presets, setPresets] = useState<Record<string, ProviderPreset>>({})
   // Image generation (sd-server): endpoint + default size drafts; the
   // tool's availability is derived from api_base alone.
@@ -8293,6 +8332,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
           )
           setUiScale(quantizeUiScale(Number(c.ui_scale) || 1.0))
           scaleSavedRef.current = quantizeUiScale(Number(c.ui_scale) || 1.0)
+          // Global step budget: '' when unset (default applies).
+          setMaxStepsDraft(
+            typeof c.max_steps === 'number' ? c.max_steps : '',
+          )
           const v = c.voice
           setVoiceDraft({
             engine: v?.engine === 'cloud' ? 'cloud' : 'local',
@@ -8551,6 +8594,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         providers: out,
         subagent_provider: subagentProvider,
         model_steps: outSteps,
+        max_steps: maxStepsDraft === '' ? undefined : maxStepsDraft,
         ui_scale: uiScale,
         voice: {
           engine: voiceDraft.engine,
@@ -9420,6 +9464,14 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 }}
               />
             </SettingsCard>
+
+            {/* Global agent step budget (issue #838): the cap applied to
+                every model without its own per-model entry. Per-model rows
+                in the Providers editor override this; 0 = unlimited. */}
+            <StepBudgetSettingsCard
+              draft={maxStepsDraft}
+              onChange={setMaxStepsDraft}
+            />
             </>
             )}
 
