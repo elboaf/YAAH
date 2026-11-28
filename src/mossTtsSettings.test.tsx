@@ -60,15 +60,15 @@ vi.mock('./api', async (importOriginal) => {
   }
 })
 
-import { SettingsModal } from './components'
+import { SettingsView } from './components'
 import { updateConfig } from './api'
 
 afterEach(() => cleanup())
 
 describe('#443 remote narration dialect', () => {
   it('hydrates the MOSS dialect and ref-clip picker, hiding OpenAI-only fields', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-    fireEvent.click(screen.getByRole('tab', { name: 'Make it talk' }))
+    render(<SettingsView onClose={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Read aloud' }))
     await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Remote narration dialect' })).toBeTruthy())
     expect(screen.getByRole('radio', { name: 'MOSS' }).getAttribute('aria-checked')).toBe('true')
     expect(screen.getByRole('combobox', { name: 'MOSS language' })).toBeTruthy()
@@ -78,8 +78,8 @@ describe('#443 remote narration dialect', () => {
   })
 
   it('saves the selected dialect and MOSS fields', async () => {
-    render(<SettingsModal onClose={() => {}} />)
-    fireEvent.click(screen.getByRole('tab', { name: 'Make it talk' }))
+    render(<SettingsView onClose={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Read aloud' }))
     await waitFor(() => expect(screen.getByRole('radiogroup', { name: 'Remote narration dialect' })).toBeTruthy())
     fireEvent.click(screen.getByRole('radio', { name: 'OpenAI-compatible' }))
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }))

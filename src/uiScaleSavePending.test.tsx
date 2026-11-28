@@ -29,7 +29,7 @@ vi.mock('./api', async (importOriginal) => {
   }
 })
 
-import { SettingsModal } from './components'
+import { SettingsView } from './components'
 
 afterEach(() => {
   cleanup()
@@ -42,9 +42,9 @@ describe('scale slider is inert while Save is pending (#171 return trip)', () =>
     const onEvt = (e: Event) => events.push((e as CustomEvent).detail.scale)
     window.addEventListener('ui-scale-changed', onEvt)
     try {
-      render(<SettingsModal onClose={() => {}} />)
-      // Interface lives on the Advanced tab (task-organized settings)
-      fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
+      render(<SettingsView onClose={() => {}} />)
+      // Interface lives on the System section (left nav rail)
+      fireEvent.click(screen.getByRole('button', { name: 'System' }))
       const slider = () =>
         screen.getByRole('slider', { name: /interface scale/i }) as HTMLInputElement
       await waitFor(() => expect(slider().disabled).toBe(false)) // loaded

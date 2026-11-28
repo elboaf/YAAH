@@ -4728,7 +4728,10 @@ export function Sidebar() {
               className="sw-strip-row"
               aria-label="Settings"
               title="Settings"
-              onClick={() => setShowSettings(true)}
+              onClick={() => {
+                setShowSettings(true)
+                window.dispatchEvent(new CustomEvent('settings-opened'))
+              }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <circle cx="12" cy="12" r="3" />
@@ -4739,15 +4742,6 @@ export function Sidebar() {
           </div>
         </div>
       </aside>
-      {showSettings && (
-        <SettingsModal
-          onClose={() => {
-            setShowSettings(false)
-            refreshGlobals()
-            refreshModels()
-          }}
-        />
-      )}
       {notice && (
         <NoticeDialog
           title={notice.title}
@@ -8055,7 +8049,7 @@ export function InterfaceScaleCard({
   )
 }
 
-export function SettingsModal({ onClose }: { onClose: () => void }) {
+export function SettingsView({ onClose }: { onClose: () => void }) {
   // Local working copy of the providers map: blank key field = keep saved key
   const overlayPressed = useRef(false)
   useEffect(() => {
@@ -8072,7 +8066,18 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
   // #383: model discovery for the sub-agent scope — the same grouped list
   // the primary selectors render from.
   const { byProvider: subagentByProvider } = useModelList()
-  const [activeTab, setActiveTab] = useState<'connect' | 'talk' | 'automate' | 'advanced'>('connect')
+  const [activeSection, setActiveSection] = useState<string>('connections')
+  // The five groups the left nav rail lists. Each carries the accent color
+  // its section's controls already own, and the DOM id its content scrolls
+  // into view. 'Read aloud' is its own group (not buried in Talk) so it is
+  // findable without digging — issue #889.
+  const navGroups = [
+    { id: 'connections', label: 'Connections', color: '#2563eb' },
+    { id: 'voice', label: 'Voice', color: '#38bdf8' },
+    { id: 'read-aloud', label: 'Read aloud', color: '#a78bfa' },
+    { id: 'agents', label: 'Agents', color: '#34d399' },
+    { id: 'system', label: 'System', color: '#8a8a8a' },
+  ] as const
   // Per-model agent settings (#111, rebuilt after the draft-overlay
   // regression): ONE authoritative map — model id -> { steps? } —
   // loaded from config and shipped as-is on Save. Absence IS deletion:
@@ -8645,94 +8650,71 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     }
   }
 
+  // Full-width page (issue #889): no floating overlay, no tabs. A left nav
+  // rail lists the five groups; the active one scrolls in the column beside
+  // it. This is the same left-rail language the app already uses, scaled up
+  // to a page so it can grow past four categories without cramping.
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onMouseDown={(e) => { if (e.target === e.currentTarget) { overlayPressed.current = true; } } } onMouseUp={(e) => { if (e.target === e.currentTarget && overlayPressed.current) { onClose(); } overlayPressed.current = false; } }
-    >
-      {/* Percentage sizing only: the app root is zoomed (UiScale), so viewport
-          units would double-zoom. Header/footer pinned, body scrolls. */}
-      <div
-        className="flex max-h-[90%] w-[92%] max-w-4xl flex-col overflow-hidden rounded-lg   bg-zinc-900 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex shrink-0 items-center justify-between   px-4 py-3">
-          <h2 className="text-sm font-semibold text-zinc-100">Settings</h2>
-          <button
-            type="button"
-            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-            onClick={onClose}
-            aria-label="Close settings"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <div
-          className="flex shrink-0 gap-1 overflow-x-auto   px-4"
-          role="tablist"
-          aria-label="Settings sections"
+    <div className="flex h-full w-full bg-[#1e1e1e] text-[#d4d4d4]">
+      {/* Page chrome: title + Close, pinned to the top. Close is the page's
+          escape hatch — same as the modal's, minus the scrim. */}
+      <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-6 py-3">
+        <h2 className="text-sm font-semibold text-zinc-100">Settings</h2>
+        <button
+          type="button"
+          className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+          onClick={onClose}
+          aria-label="Close settings"
         >
-          {([
-            // Task-organized tabs, not implementation dumps: the three
-            // questions a new user actually asks in order.
-            ['connect', 'Connect a model'],
-            ['talk', 'Make it talk'],
-            ['automate', 'Automate'],
-            ['advanced', 'Advanced'],
-          ] as const).map(([tab, label]) => (
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      {/* Left nav rail: the five groups. Active item is the single blue
+          voice in the room — Action Blue on human action. Clicking a group
+          scrolls its content into view. */}
+      <nav
+        className="shrink-0 border-r border-zinc-800 bg-zinc-900/60 p-3"
+        aria-label="Settings sections"
+      >
+        <div className="flex flex-col gap-0.5">
+          {navGroups.map((g) => (
             <button
-              key={tab}
+              key={g.id}
               type="button"
-              role="tab"
-              id={`settings-tab-${tab}`}
-              aria-selected={activeTab === tab}
-              aria-controls="settings-panel"
-              tabIndex={activeTab === tab ? 0 : -1}
-              onClick={() => setActiveTab(tab)}
-              onKeyDown={(e) => {
-                const tabs = ['connect', 'talk', 'automate', 'advanced'] as const
-                const index = tabs.indexOf(tab)
-                const next = e.key === 'ArrowRight'
-                  ? (index + 1) % tabs.length
-                  : e.key === 'ArrowLeft'
-                    ? (index - 1 + tabs.length) % tabs.length
-                    : e.key === 'Home'
-                      ? 0
-                      : e.key === 'End'
-                        ? tabs.length - 1
-                        : -1
-                if (next >= 0) {
-                  e.preventDefault()
-                  const nextTab = tabs[next]
-                  setActiveTab(nextTab)
-                  document.getElementById(`settings-tab-${nextTab}`)?.focus()
-                }
+              onClick={() => {
+                setActiveSection(g.id)
+                document.getElementById(`settings-section-${g.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
               }}
-              className={`shrink-0 border-b-2 px-3 py-2.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 ${
-                activeTab === tab
-                  ? 'border-blue-500 text-zinc-100'
-                  : 'border-transparent text-zinc-500 hover:text-zinc-300'
+              aria-current={activeSection === g.id}
+              className={`flex items-center gap-3 rounded px-3 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500 ${
+                activeSection === g.id
+                  ? 'bg-blue-600/15 text-zinc-100'
+                  : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
               }`}
             >
-              {label}
+              <span
+                className="h-2 w-2 shrink-0 rounded-sm"
+                style={{ backgroundColor: g.color }}
+                aria-hidden="true"
+              />
+              <span className="font-mono text-[11px] uppercase tracking-[0.08em]">{g.label}</span>
             </button>
           ))}
         </div>
+      </nav>
 
-        <div
-          className="min-h-0 flex-1 overflow-y-auto p-4"
-          role="tabpanel"
-          id="settings-panel"
-          aria-labelledby={`settings-tab-${activeTab}`}
-          tabIndex={0}
-        >
-          <div className="grid grid-cols-4 gap-3">
+      {/* Content column: the five groups stacked, each scrolling into view
+          when its nav item is chosen. The footer (Save/Cancel) is pinned to
+          the bottom so it never scrolls away — same as the modal's footer. */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto max-w-3xl px-8 py-6">
             {/* providers: collapsed rows; fields behind one open row */}
-            {activeTab === 'connect' && (
-              <>
+            {activeSection === 'connections' && (
+              <div id="settings-section-connections" className="space-y-6">
               <ModelServerSettingsCard />
               <RerankerServerSettingsCard />
               <EmbeddingsSettingsCard draft={embeddingsDraft} onChange={setEmbeddingsDraft} />
@@ -8939,11 +8921,11 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 or removed fails that spawn with an error.
               </p>
             </SettingsCard>
-              </>
+              </div>
             )}
-            {activeTab === 'talk' && (
-              <>
-                <SettingsCard title="Voice dictation" className="col-span-2">
+            {activeSection === 'voice' && (
+              <div id="settings-section-voice" className="space-y-6">
+                <SettingsCard title="Voice dictation" className="w-full">
               <div className="mb-2.5 flex gap-1.5" role="radiogroup" aria-label="Transcription engine">
                 {(['local', 'cloud'] as const).map((engine) => (
                   <button
@@ -9062,7 +9044,10 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 focused, the card itself is the signal.
               </p>
             </SettingsCard>
-
+              </div>
+            )}
+            {activeSection === 'read-aloud' && (
+              <div id="settings-section-read-aloud" className="space-y-6">
             <SaySettingsCard
               sayEmissions={ttsDraft.say_emissions}
               sayInChat={ttsDraft.say_in_chat}
@@ -9072,7 +9057,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
               onSayPersona={(v) => setTtsDraft({ ...ttsDraft, say_persona: v })}
             />
 
-            <SettingsCard title="Read aloud" className="col-span-2">
+            <SettingsCard title="Read aloud" className="w-full">
               <div className="mb-2.5 flex gap-1.5" role="radiogroup" aria-label="Narration engine">
                 {(['local', 'remote'] as const).map((engine) => (
                   <button
@@ -9349,13 +9334,13 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 <p className="mt-2 text-[10px] text-red-400">Read-aloud error: {ttsUiError}</p>
               )}
             </SettingsCard>
-            </>
+              </div>
             )}
 
-            {activeTab === 'advanced' && (
-              <>
+            {activeSection === 'system' && (
+              <div id="settings-section-system" className="space-y-6">
                 {!isWindowsPlatform() ? null : (
-                  <SettingsCard title="Windows Sandbox" className="col-span-2">
+                  <SettingsCard title="Windows Sandbox" className="w-full">
                     <SandboxSettingsCard />
                   </SettingsCard>
                 )}
@@ -9420,12 +9405,12 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
                 }}
               />
             </SettingsCard>
-            </>
+              </div>
             )}
 
-            {activeTab === 'automate' && (
-              <>
-            <SettingsCard title="Scheduled agents" className="col-span-4">
+            {activeSection === 'agents' && (
+              <div id="settings-section-agents" className="space-y-6">
+            <SettingsCard title="Scheduled agents" className="w-full">
               <AgentsSettingsSection />
             </SettingsCard>
               <SettingsCard title="MCP tool servers" className="col-span-4">
@@ -9433,7 +9418,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             </SettingsCard>
             {/* Windows-only (#635): the Linux build omits the section. */}
             <BrowserControlSettingsCard />
-              </>
+              </div>
             )}
           </div>
         </div>

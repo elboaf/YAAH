@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BASE, IS_TAURI, getConfig, getMessages } from './api'
 import { quantizeUiScale } from './jitter'
-import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, ImageLightbox, PreviewModal, RemoteRunWatcher, Sidebar, ToastStack } from './components'
+import { AgentChatLiveFollow, AgentRunWatcher, AgentSayWatcher, ChatPanel, ImageLightbox, PreviewModal, RemoteRunWatcher, Sidebar, SettingsView, ToastStack } from './components'
 import { NativeMenuGate } from './nativeMenu'
 import { useAgent, persistConversationId } from './store'
 import { NotificationSounds } from './NotificationSounds'
@@ -223,6 +223,7 @@ function RestoreSession() {
 }
 
 export default function App() {
+  const [showSettings, setShowSettings] = useState(false)
   return (
     <div className="relative flex h-full w-full bg-[#1e1e1e] text-[#d4d4d4] font-sans">
       {/* #287: suppress the WebView2 default context menu outside editables
@@ -247,7 +248,11 @@ export default function App() {
       {/* FilesPanel is GUI-removed (see DESIGN.md Layout): the component and
           its wiring stay in components.tsx — restore by re-adding the mount:
           <FilesPanel /> */}
-      <ChatPanel />
+      {showSettings ? (
+        <SettingsView onClose={() => setShowSettings(false)} />
+      ) : (
+        <ChatPanel />
+      )}
       <PreviewModal />
       <ImageLightbox />
       <ToastStack />

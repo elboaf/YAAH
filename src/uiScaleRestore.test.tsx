@@ -29,7 +29,7 @@ vi.mock('./api', async (importOriginal) => {
 })
 // call counter lives outside the module mock (hoisting) — attach via a probe
 
-import { InterfaceScaleCard, SettingsModal } from './components'
+import { InterfaceScaleCard, SettingsView } from './components'
 import { getConfig } from './api'
 
 afterEach(() => cleanup())
@@ -58,9 +58,9 @@ describe('settings modal restores the persisted zoom synchronously (#171 return 
 
   it('re-emits the persisted scale on unmount after an unsaved drag — synchronously, without re-fetching config', async () => {
     listen()
-    const { unmount } = render(<SettingsModal onClose={() => {}} />)
-    // Interface lives on the Advanced tab (task-organized settings)
-    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
+    const { unmount } = render(<SettingsView onClose={() => {}} />)
+    // Interface lives on the System section (left nav rail)
+    fireEvent.click(screen.getByRole('button', { name: 'System' }))
     await waitFor(() =>
       expect(screen.getByRole('slider', { name: /interface scale/i })).toBeTruthy(),
     )
@@ -78,9 +78,9 @@ describe('settings modal restores the persisted zoom synchronously (#171 return 
 
   it('does not re-emit a stale restore after Save → close', async () => {
     listen()
-    const { unmount } = render(<SettingsModal onClose={() => {}} />)
-    // Interface lives on the Advanced tab (task-organized settings)
-    fireEvent.click(screen.getByRole('tab', { name: 'Advanced' }))
+    const { unmount } = render(<SettingsView onClose={() => {}} />)
+    // Interface lives on the System section (left nav rail)
+    fireEvent.click(screen.getByRole('button', { name: 'System' }))
     await waitFor(() =>
       expect(screen.getByRole('slider', { name: /interface scale/i })).toBeTruthy(),
     )
